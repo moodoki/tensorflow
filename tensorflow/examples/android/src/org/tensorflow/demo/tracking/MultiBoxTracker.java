@@ -163,8 +163,8 @@ public class MultiBoxTracker {
         ImageUtils.getTransformationMatrix(
             frameWidth,
             frameHeight,
-            (int) (multiplier * frameHeight),
             (int) (multiplier * frameWidth),
+            (int) (multiplier * frameHeight),
             sensorOrientation,
             false);
     for (final TrackedRecognition recognition : trackedObjects) {
