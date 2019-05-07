@@ -21,7 +21,6 @@ limitations under the License.
 #include "tensorflow/core/graph/subgraph.h"
 #include "tensorflow/core/platform/init_main.h"
 #include "tensorflow/core/public/session.h"
-#include "tensorflow/core/util/command_line_flags.h"
 #include "tensorflow/tools/graph_transforms/transform_utils.h"
 
 namespace tensorflow {
@@ -34,7 +33,7 @@ Status RemoveAttribute(const GraphDef& input_graph_def,
   if (!context.params.count("attribute_name") ||
       (context.params.at("attribute_name").size() != 1)) {
     return errors::InvalidArgument(
-        "remove_nodes expects exactly one 'attribute_name' "
+        "remove_attribute expects exactly one 'attribute_name' "
         "argument, e.g. remove_attribute(op_name=Mul, attribute_name=foo)");
   }
 
@@ -42,7 +41,7 @@ Status RemoveAttribute(const GraphDef& input_graph_def,
   if (context.params.count("op_name")) {
     if (context.params.at("op_name").size() != 1) {
       return errors::InvalidArgument(
-          "remove_nodes expects a single op_name argument, but found ",
+          "remove_attribute expects a single op_name argument, but found ",
           context.params.at("op_name").size());
     }
     op_name = context.params.at("op_name")[0];
@@ -54,7 +53,7 @@ Status RemoveAttribute(const GraphDef& input_graph_def,
   output_graph_def->Clear();
   for (const NodeDef& node : input_graph_def.node()) {
     NodeDef* new_node = output_graph_def->mutable_node()->Add();
-    new_node->CopyFrom(node);
+    *new_node = node;
     if (((op_name == "*") || (op_name == node.op())) &&
         (node.attr().count(attribute_name))) {
       new_node->mutable_attr()->erase(attribute_name);

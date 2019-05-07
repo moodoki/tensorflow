@@ -13,17 +13,18 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#ifndef TENSORFLOW_FRAMEWORK_READER_BASE_H_
-#define TENSORFLOW_FRAMEWORK_READER_BASE_H_
+#ifndef TENSORFLOW_CORE_FRAMEWORK_READER_BASE_H_
+#define TENSORFLOW_CORE_FRAMEWORK_READER_BASE_H_
 
 #include <memory>
 #include <string>
 #include "tensorflow/core/framework/queue_interface.h"
-#include "tensorflow/core/framework/reader_base.pb.h"
 #include "tensorflow/core/framework/reader_interface.h"
 #include "tensorflow/core/lib/core/stringpiece.h"
 
 namespace tensorflow {
+
+class ReaderBaseState;
 
 // Default implementation of ReaderInterface.
 class ReaderBase : public ReaderInterface {
@@ -134,4 +135,4 @@ class ReaderBase : public ReaderInterface {
 
 }  // namespace tensorflow
 
-#endif  // TENSORFLOW_KERNELS_READER_BASE_H_
+#endif  // TENSORFLOW_CORE_FRAMEWORK_READER_BASE_H_

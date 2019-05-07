@@ -17,8 +17,6 @@ limitations under the License.
 
 #define EIGEN_USE_THREADS
 
-#include "tensorflow/core/kernels/random_op.h"
-
 #include <algorithm>
 #include <cmath>
 #include <memory>
@@ -27,6 +25,7 @@ limitations under the License.
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_shape.h"
+#include "tensorflow/core/kernels/random_op_cpu.h"
 #include "tensorflow/core/lib/hash/crc32c.h"
 #include "tensorflow/core/lib/random/random_distributions.h"
 #include "tensorflow/core/lib/random/simple_philox.h"
@@ -48,131 +47,9 @@ namespace tensorflow {
 
 typedef Eigen::ThreadPoolDevice CPUDevice;
 typedef Eigen::GpuDevice GPUDevice;
-
-namespace functor {
-using random::PhiloxRandom;
-using random::SingleSampleAdapter;
-
-// The default implementation of the functor, which should never be invoked
-// But we still need to provide implementation for now for the linker to work,
-// since we do not support all the distributions yet.
-template <typename Device, class Distribution>
-struct FillPhiloxRandom {
-  typedef typename Distribution::ResultElementType T;
-  void operator()(OpKernelContext*, const Device&, random::PhiloxRandom gen,
-                  T* data, int64 size, Distribution dist) {
-    LOG(FATAL) << "Default FillPhiloxRandom should not be executed.";
-  }
-};
-
-// A class to fill a specified range of random groups
-template <class Distribution, bool VariableSamplesPerOutput>
-struct FillPhiloxRandomTask;
-
-// Specialization for distribution that takes a fixed number of samples for
-// each output.
-template <class Distribution>
-struct FillPhiloxRandomTask<Distribution, false> {
-  typedef typename Distribution::ResultElementType T;
-  static void Run(random::PhiloxRandom gen, T* data, int64 size,
-                  int64 start_group, int64 limit_group, Distribution dist) {
-    const int kGroupSize = Distribution::kResultElementCount;
-
-    gen.Skip(start_group);
-    int64 offset = start_group * kGroupSize;
-
-    // First fill all the full-size groups
-    int64 limit_group_full = std::min(limit_group, size / kGroupSize);
-    for (int64 index = start_group; index < limit_group_full; ++index) {
-      auto samples = dist(&gen);
-      std::copy(&samples[0], &samples[0] + kGroupSize, data + offset);
-      offset += kGroupSize;
-    }
-
-    // If there are any remaining elements that need to be filled, process them
-    if (limit_group_full < limit_group) {
-      int64 remaining_size = size - limit_group_full * kGroupSize;
-      auto samples = dist(&gen);
-      std::copy(&samples[0], &samples[0] + remaining_size, data + offset);
-    }
-  }
-};
-
-// Specialization for distribution that takes a variable number of samples for
-// each output. This will be slower due to the generality.
-template <class Distribution>
-struct FillPhiloxRandomTask<Distribution, true> {
-  typedef typename Distribution::ResultElementType T;
-  static const int64 kReservedSamplesPerOutput = 256;
-
-  static void Run(random::PhiloxRandom base_gen, T* data, int64 size,
-                  int64 start_group, int64 limit_group, Distribution dist) {
-    const int kGroupSize = Distribution::kResultElementCount;
-
-    static const int kGeneratorSkipPerOutputGroup =
-        kGroupSize * kReservedSamplesPerOutput /
-        PhiloxRandom::kResultElementCount;
-
-    int64 offset = start_group * kGroupSize;
-
-    // First fill all the full-size groups
-    int64 limit_group_full = std::min(limit_group, size / kGroupSize);
-    int64 group_index;
-    for (group_index = start_group; group_index < limit_group_full;
-         ++group_index) {
-      // Reset the generator to the beginning of the output group region
-      // This is necessary if we want the results to be independent of order
-      // of work
-      PhiloxRandom gen = base_gen;
-      gen.Skip(group_index * kGeneratorSkipPerOutputGroup);
-      SingleSampleAdapter<PhiloxRandom> single_samples(&gen);
-
-      auto samples = dist(&single_samples);
-      std::copy(&samples[0], &samples[0] + kGroupSize, data + offset);
-      offset += kGroupSize;
-    }
-
-    // If there are any remaining elements that need to be filled, process them
-    if (limit_group_full < limit_group) {
-      PhiloxRandom gen = base_gen;
-      gen.Skip(group_index * kGeneratorSkipPerOutputGroup);
-      SingleSampleAdapter<PhiloxRandom> single_samples(&gen);
-
-      int64 remaining_size = size - limit_group_full * kGroupSize;
-      auto samples = dist(&single_samples);
-      std::copy(&samples[0], &samples[0] + remaining_size, data + offset);
-    }
-  }
-};
-
-// Partial specialization for CPU to fill the entire region with randoms
-// It splits the work into several tasks and run them in parallel
-template <class Distribution>
-void FillPhiloxRandom<CPUDevice, Distribution>::operator()(
-    OpKernelContext* context, const CPUDevice&, random::PhiloxRandom gen,
-    typename Distribution::ResultElementType* data, int64 size,
-    Distribution dist) {
-  const int kGroupSize = Distribution::kResultElementCount;
-
-  auto worker_threads = *(context->device()->tensorflow_cpu_worker_threads());
-
-  int64 total_group_count = (size + kGroupSize - 1) / kGroupSize;
-
-  const int kGroupCost =
-      random::PhiloxRandom::kResultElementCount *
-      (random::PhiloxRandom::kElementCost + Distribution::kElementCost);
-  Shard(worker_threads.num_threads, worker_threads.workers, total_group_count,
-        kGroupCost,
-        [&gen, data, size, dist](int64 start_group, int64 limit_group) {
-          FillPhiloxRandomTask<
-              Distribution,
-              Distribution::kVariableSamplesPerOutput>::Run(gen, data, size,
-                                                            start_group,
-                                                            limit_group, dist);
-        });
-}
-
-}  // namespace functor
+#ifdef TENSORFLOW_USE_SYCL
+typedef Eigen::SyclDevice SYCLDevice;
+#endif  // TENSORFLOW_USE_SYCL
 
 namespace {
 
@@ -228,7 +105,13 @@ class RandomUniformIntOp : public OpKernel {
                 errors::InvalidArgument("maxval must be 0-D, got shape ",
                                         maxval.shape().DebugString()));
 
-    // Verify that minval < maxval
+    // Allocate output, and exit early if possible
+    Tensor* output;
+    OP_REQUIRES_OK(ctx, AllocateOutputWithShape(ctx, shape, 0, &output));
+    if (output->NumElements() == 0) return;
+
+    // Verify that minval < maxval.  This check intentionally happens after the
+    // early exit for empty output.  Zero impossible things are fine.
     IntType lo = minval.scalar<IntType>()();
     IntType hi = maxval.scalar<IntType>()();
     OP_REQUIRES(
@@ -240,8 +123,6 @@ class RandomUniformIntOp : public OpKernel {
         Distribution;
     Distribution dist(lo, hi);
 
-    Tensor* output;
-    OP_REQUIRES_OK(ctx, AllocateOutputWithShape(ctx, shape, 0, &output));
     auto output_flat = output->flat<IntType>();
     functor::FillPhiloxRandom<Device, Distribution>()(
         ctx, ctx->eigen_device<Device>(),
@@ -268,9 +149,10 @@ class RandomGammaOp : public OpKernel {
     const Tensor& shape_t = ctx->input(0);
     const Tensor& alpha_t = ctx->input(1);
 
-    OP_REQUIRES(ctx, TensorShapeUtils::IsVector(shape_t.shape()) &&
-                         (shape_t.dtype() == DataType::DT_INT32 ||
-                          shape_t.dtype() == DataType::DT_INT64),
+    OP_REQUIRES(ctx,
+                TensorShapeUtils::IsVector(shape_t.shape()) &&
+                    (shape_t.dtype() == DataType::DT_INT32 ||
+                     shape_t.dtype() == DataType::DT_INT64),
                 errors::InvalidArgument(
                     "shape must be a vector of {int32,int64}, got shape: ",
                     shape_t.DebugString()));
@@ -285,12 +167,13 @@ class RandomGammaOp : public OpKernel {
                                                       &samples_shape));
     }
     const int64 num_samples = samples_shape.num_elements();
-    if (num_samples == 0) return;
 
     samples_shape.AppendShape(alpha_t.shape());
     // Allocate output samples.
     Tensor* samples_t = nullptr;
     OP_REQUIRES_OK(ctx, ctx->allocate_output(0, samples_shape, &samples_t));
+
+    if (samples_shape.num_elements() == 0) return;
 
     using random::PhiloxRandom;
 
@@ -321,7 +204,7 @@ class RandomGammaOp : public OpKernel {
     // avoid a couple flops which can be done on a per-alpha basis.
 
     auto DoWork = [num_samples, num_alphas, &rng, samples_flat, alpha_flat](
-        int start_output, int limit_output) {
+                      int start_output, int limit_output) {
       using Eigen::numext::exp;
       using Eigen::numext::log;
       using Eigen::numext::pow;
@@ -345,7 +228,7 @@ class RandomGammaOp : public OpKernel {
         const double alpha = static_cast<double>(alpha_flat[alpha_idx]);
 
         DISABLE_FLOAT_EQUALITY_WARNING
-        if (alpha == double(1.0)) {
+        if (alpha == static_cast<double>(1.0)) {
           ENABLE_FLOAT_EQUALITY_WARNING
           // Sample from an exponential distribution.
           for (int64 sample_idx = output_idx % num_samples;
@@ -355,7 +238,7 @@ class RandomGammaOp : public OpKernel {
             // (including eventually on GPU), we skip on a per-sample basis.
             PhiloxRandom gen = rng;
             gen.Skip(kReservedSamplesPerOutput * output_idx);
-            short uniform_remaining = 0;
+            int16 uniform_remaining = 0;
             UNIFORM(u);
             const double res = -log(1.0 - u);
             samples_alpha_offset[sample_idx * num_alphas] = static_cast<T>(res);
@@ -383,8 +266,8 @@ class RandomGammaOp : public OpKernel {
             // (including eventually on GPU), we skip on a per-sample basis.
             PhiloxRandom gen = rng;
             gen.Skip(kReservedSamplesPerOutput * output_idx);
-            short norm_remaining = 0;
-            short uniform_remaining = 0;
+            int16 norm_remaining = 0;
+            int16 uniform_remaining = 0;
 
             // Keep trying until we don't reject a sample. In practice, we will
             // only reject ~5% at worst, for low alpha near 1.
@@ -444,52 +327,55 @@ class RandomGammaOp : public OpKernel {
 
 }  // namespace
 
-#define REGISTER(TYPE)                                                      \
-  template struct functor::FillPhiloxRandom<                                \
-      CPUDevice, random::UniformDistribution<random::PhiloxRandom, TYPE> >; \
-  template struct functor::FillPhiloxRandom<                                \
-      CPUDevice, random::NormalDistribution<random::PhiloxRandom, TYPE> >;  \
-  template struct functor::FillPhiloxRandom<                                \
-      CPUDevice,                                                            \
-      random::TruncatedNormalDistribution<                                  \
-          random::SingleSampleAdapter<random::PhiloxRandom>, TYPE> >;       \
-  REGISTER_KERNEL_BUILDER(                                                  \
-      Name("RandomUniform")                                                 \
-          .Device(DEVICE_CPU)                                               \
-          .HostMemory("shape")                                              \
-          .TypeConstraint<TYPE>("dtype"),                                   \
-      PhiloxRandomOp<CPUDevice, random::UniformDistribution<                \
-                                    random::PhiloxRandom, TYPE> >);         \
-  REGISTER_KERNEL_BUILDER(                                                  \
-      Name("RandomStandardNormal")                                          \
-          .Device(DEVICE_CPU)                                               \
-          .HostMemory("shape")                                              \
-          .TypeConstraint<TYPE>("dtype"),                                   \
-      PhiloxRandomOp<CPUDevice, random::NormalDistribution<                 \
-                                    random::PhiloxRandom, TYPE> >);         \
-  REGISTER_KERNEL_BUILDER(                                                  \
-      Name("TruncatedNormal")                                               \
-          .Device(DEVICE_CPU)                                               \
-          .HostMemory("shape")                                              \
-          .TypeConstraint<TYPE>("dtype"),                                   \
-      PhiloxRandomOp<                                                       \
-          CPUDevice,                                                        \
-          random::TruncatedNormalDistribution<                              \
-              random::SingleSampleAdapter<random::PhiloxRandom>, TYPE> >);  \
-  REGISTER_KERNEL_BUILDER(                                                  \
-      Name("RandomGamma").Device(DEVICE_CPU).TypeConstraint<TYPE>("T"),     \
+#define REGISTER(TYPE)                                                         \
+  template struct functor::FillPhiloxRandom<                                   \
+      CPUDevice, random::UniformDistribution<random::PhiloxRandom, TYPE>>;     \
+  template struct functor::FillPhiloxRandom<                                   \
+      CPUDevice, random::NormalDistribution<random::PhiloxRandom, TYPE>>;      \
+  template struct functor::FillPhiloxRandom<                                   \
+      CPUDevice,                                                               \
+      random::TruncatedNormalDistribution<                                     \
+          random::SingleSampleAdapter<random::PhiloxRandom>, TYPE>>;           \
+  REGISTER_KERNEL_BUILDER(                                                     \
+      Name("RandomUniform")                                                    \
+          .Device(DEVICE_CPU)                                                  \
+          .HostMemory("shape")                                                 \
+          .TypeConstraint<TYPE>("dtype"),                                      \
+      PhiloxRandomOp<CPUDevice, random::UniformDistribution<                   \
+                                    random::PhiloxRandom, TYPE>>);             \
+  REGISTER_KERNEL_BUILDER(                                                     \
+      Name("RandomStandardNormal")                                             \
+          .Device(DEVICE_CPU)                                                  \
+          .HostMemory("shape")                                                 \
+          .TypeConstraint<TYPE>("dtype"),                                      \
+      PhiloxRandomOp<CPUDevice,                                                \
+                     random::NormalDistribution<random::PhiloxRandom, TYPE>>); \
+  REGISTER_KERNEL_BUILDER(                                                     \
+      Name("TruncatedNormal")                                                  \
+          .Device(DEVICE_CPU)                                                  \
+          .HostMemory("shape")                                                 \
+          .TypeConstraint<TYPE>("dtype"),                                      \
+      PhiloxRandomOp<                                                          \
+          CPUDevice,                                                           \
+          random::TruncatedNormalDistribution<                                 \
+              random::SingleSampleAdapter<random::PhiloxRandom>, TYPE>>);      \
+  REGISTER_KERNEL_BUILDER(                                                     \
+      Name("RandomGamma").Device(DEVICE_CPU).TypeConstraint<TYPE>("T"),        \
       RandomGammaOp<TYPE>)
 
-#define REGISTER_INT(IntType)                                   \
-  REGISTER_KERNEL_BUILDER(Name("RandomUniformInt")              \
-                              .Device(DEVICE_CPU)               \
-                              .HostMemory("shape")              \
-                              .HostMemory("minval")             \
-                              .HostMemory("maxval")             \
-                              .TypeConstraint<IntType>("Tout"), \
+#define REGISTER_INT(IntType)                                                 \
+  template struct functor::FillPhiloxRandom<                                  \
+      CPUDevice, random::UniformDistribution<random::PhiloxRandom, IntType>>; \
+  REGISTER_KERNEL_BUILDER(Name("RandomUniformInt")                            \
+                              .Device(DEVICE_CPU)                             \
+                              .HostMemory("shape")                            \
+                              .HostMemory("minval")                           \
+                              .HostMemory("maxval")                           \
+                              .TypeConstraint<IntType>("Tout"),               \
                           RandomUniformIntOp<CPUDevice, IntType>);
 
 TF_CALL_half(REGISTER);
+TF_CALL_bfloat16(REGISTER);
 TF_CALL_float(REGISTER);
 TF_CALL_double(REGISTER);
 TF_CALL_int32(REGISTER_INT);
@@ -500,42 +386,44 @@ TF_CALL_int64(REGISTER_INT);
 
 #if GOOGLE_CUDA
 
-#define REGISTER(TYPE)                                              \
-  REGISTER_KERNEL_BUILDER(                                          \
-      Name("RandomUniform")                                         \
-          .Device(DEVICE_GPU)                                       \
-          .HostMemory("shape")                                      \
-          .TypeConstraint<int32>("T")                               \
-          .TypeConstraint<TYPE>("dtype"),                           \
-      PhiloxRandomOp<GPUDevice, random::UniformDistribution<        \
-                                    random::PhiloxRandom, TYPE> >); \
-  REGISTER_KERNEL_BUILDER(                                          \
-      Name("RandomStandardNormal")                                  \
-          .Device(DEVICE_GPU)                                       \
-          .HostMemory("shape")                                      \
-          .TypeConstraint<int32>("T")                               \
-          .TypeConstraint<TYPE>("dtype"),                           \
-      PhiloxRandomOp<GPUDevice, random::NormalDistribution<         \
-                                    random::PhiloxRandom, TYPE> >); \
-  REGISTER_KERNEL_BUILDER(                                          \
-      Name("TruncatedNormal")                                       \
-          .Device(DEVICE_GPU)                                       \
-          .HostMemory("shape")                                      \
-          .TypeConstraint<int32>("T")                               \
-          .TypeConstraint<TYPE>("dtype"),                           \
-      PhiloxRandomOp<                                               \
-          GPUDevice,                                                \
-          random::TruncatedNormalDistribution<                      \
-              random::SingleSampleAdapter<random::PhiloxRandom>, TYPE> >);
+#define REGISTER(TYPE)                                                         \
+  REGISTER_KERNEL_BUILDER(                                                     \
+      Name("RandomUniform")                                                    \
+          .Device(DEVICE_GPU)                                                  \
+          .HostMemory("shape")                                                 \
+          .TypeConstraint<int32>("T")                                          \
+          .TypeConstraint<TYPE>("dtype"),                                      \
+      PhiloxRandomOp<GPUDevice, random::UniformDistribution<                   \
+                                    random::PhiloxRandom, TYPE>>);             \
+  REGISTER_KERNEL_BUILDER(                                                     \
+      Name("RandomStandardNormal")                                             \
+          .Device(DEVICE_GPU)                                                  \
+          .HostMemory("shape")                                                 \
+          .TypeConstraint<int32>("T")                                          \
+          .TypeConstraint<TYPE>("dtype"),                                      \
+      PhiloxRandomOp<GPUDevice,                                                \
+                     random::NormalDistribution<random::PhiloxRandom, TYPE>>); \
+  REGISTER_KERNEL_BUILDER(                                                     \
+      Name("TruncatedNormal")                                                  \
+          .Device(DEVICE_GPU)                                                  \
+          .HostMemory("shape")                                                 \
+          .TypeConstraint<int32>("T")                                          \
+          .TypeConstraint<TYPE>("dtype"),                                      \
+      PhiloxRandomOp<                                                          \
+          GPUDevice,                                                           \
+          random::TruncatedNormalDistribution<                                 \
+              random::SingleSampleAdapter<random::PhiloxRandom>, TYPE>>);
 
-#define REGISTER_INT(IntType)                                   \
-  REGISTER_KERNEL_BUILDER(Name("RandomUniformInt")              \
-                              .Device(DEVICE_GPU)               \
-                              .HostMemory("shape")              \
-                              .HostMemory("minval")             \
-                              .HostMemory("maxval")             \
-                              .TypeConstraint<int32>("T")       \
-                              .TypeConstraint<IntType>("Tout"), \
+#define REGISTER_INT(IntType)                                                 \
+  template struct functor::FillPhiloxRandom<                                  \
+      GPUDevice, random::UniformDistribution<random::PhiloxRandom, IntType>>; \
+  REGISTER_KERNEL_BUILDER(Name("RandomUniformInt")                            \
+                              .Device(DEVICE_GPU)                             \
+                              .HostMemory("shape")                            \
+                              .HostMemory("minval")                           \
+                              .HostMemory("maxval")                           \
+                              .TypeConstraint<int32>("T")                     \
+                              .TypeConstraint<IntType>("Tout"),               \
                           RandomUniformIntOp<GPUDevice, IntType>);
 
 TF_CALL_half(REGISTER);
@@ -548,5 +436,53 @@ TF_CALL_int64(REGISTER_INT);
 #undef REGISTER_INT
 
 #endif  // GOOGLE_CUDA
+
+#ifdef TENSORFLOW_USE_SYCL
+
+#define REGISTER(TYPE)                                                         \
+  template struct functor::FillPhiloxRandom<                                   \
+      SYCLDevice, random::UniformDistribution<random::PhiloxRandom, TYPE>>;    \
+  REGISTER_KERNEL_BUILDER(                                                     \
+      Name("RandomUniform")                                                    \
+          .Device(DEVICE_SYCL)                                                 \
+          .HostMemory("shape")                                                 \
+          .TypeConstraint<TYPE>("dtype"),                                      \
+      PhiloxRandomOp<SYCLDevice, random::UniformDistribution<                  \
+                                     random::PhiloxRandom, TYPE>>);            \
+  REGISTER_KERNEL_BUILDER(                                                     \
+      Name("RandomStandardNormal")                                             \
+          .Device(DEVICE_SYCL)                                                 \
+          .HostMemory("shape")                                                 \
+          .TypeConstraint<TYPE>("dtype"),                                      \
+      PhiloxRandomOp<SYCLDevice,                                               \
+                     random::NormalDistribution<random::PhiloxRandom, TYPE>>); \
+  REGISTER_KERNEL_BUILDER(                                                     \
+      Name("TruncatedNormal")                                                  \
+          .Device(DEVICE_SYCL)                                                 \
+          .HostMemory("shape")                                                 \
+          .TypeConstraint<TYPE>("dtype"),                                      \
+      PhiloxRandomOp<                                                          \
+          SYCLDevice,                                                          \
+          random::TruncatedNormalDistribution<                                 \
+              random::SingleSampleAdapter<random::PhiloxRandom>, TYPE>>);
+
+#define REGISTER_INT(IntType)                                   \
+  REGISTER_KERNEL_BUILDER(Name("RandomUniformInt")              \
+                              .Device(DEVICE_SYCL)              \
+                              .HostMemory("shape")              \
+                              .HostMemory("minval")             \
+                              .HostMemory("maxval")             \
+                              .TypeConstraint<IntType>("Tout"), \
+                          RandomUniformIntOp<SYCLDevice, IntType>);
+
+TF_CALL_float(REGISTER);
+TF_CALL_double(REGISTER);
+TF_CALL_int32(REGISTER_INT);
+TF_CALL_int64(REGISTER_INT);
+
+#undef REGISTER
+#undef REGISTER_INT
+
+#endif  // TENSORFLOW_USE_SYCL
 
 }  // end namespace tensorflow

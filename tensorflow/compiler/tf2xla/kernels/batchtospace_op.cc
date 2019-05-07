@@ -16,17 +16,17 @@ limitations under the License.
 #include "tensorflow/compiler/tf2xla/xla_helpers.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
+#include "tensorflow/compiler/xla/client/xla_builder.h"
 
 namespace tensorflow {
 namespace {
 
-void BatchToSpace(XlaOpKernelContext* ctx,
-                  const xla::ComputationDataHandle& input, DataType input_dtype,
-                  const TensorShape& input_tensor_shape,
-                  gtl::ArraySlice<int64> block_shape,
+void BatchToSpace(XlaOpKernelContext* ctx, const xla::XlaOp& input,
+                  DataType input_dtype, const TensorShape& input_tensor_shape,
+                  absl::Span<const int64> block_shape,
                   const xla::Literal& crops) {
   const int input_rank = input_tensor_shape.dims();
-  const gtl::InlinedVector<int64, 4> input_shape =
+  const absl::InlinedVector<int64, 4> input_shape =
       input_tensor_shape.dim_sizes();
   const int block_rank = block_shape.size();
 
@@ -34,19 +34,18 @@ void BatchToSpace(XlaOpKernelContext* ctx,
       ctx, input_rank >= 1 + block_rank,
       errors::InvalidArgument("input rank should be >= ", 1 + block_rank,
                               " instead of ", input_rank));
-  gtl::ArraySlice<int64> remainder_shape(input_shape);
+  absl::Span<const int64> remainder_shape(input_shape);
   remainder_shape.remove_prefix(1 + block_rank);
 
   OP_REQUIRES(
       ctx,
-      xla::ShapeUtil::Rank(crops.shape()) == 2 &&
+      crops.shape().rank() == 2 &&
           block_rank == xla::ShapeUtil::GetDimension(crops.shape(), 0) &&
           2 == xla::ShapeUtil::GetDimension(crops.shape(), 1),
       errors::InvalidArgument("crops should have shape [", block_rank,
                               ", 2] instead of ",
                               xla::ShapeUtil::HumanString(crops.shape())));
 
-  xla::ComputationBuilder* b = ctx->builder();
   const int64 batch_size = input_shape[0];
 
   // Compute the product of the block_shape values.
@@ -73,7 +72,7 @@ void BatchToSpace(XlaOpKernelContext* ctx,
   reshaped_shape[block_rank] = batch_size / block_num_elems;
   std::copy(input_shape.begin() + 1, input_shape.end(),
             reshaped_shape.begin() + block_rank + 1);
-  xla::ComputationDataHandle reshaped = b->Reshape(input, reshaped_shape);
+  xla::XlaOp reshaped = xla::Reshape(input, reshaped_shape);
 
   // 2. Permute dimensions of `reshaped` to produce `permuted` of shape
   //      [batch / prod(block_shape),
@@ -91,7 +90,7 @@ void BatchToSpace(XlaOpKernelContext* ctx,
   }
   std::iota(permutation.begin() + 1 + block_rank * 2, permutation.end(),
             1 + block_rank * 2);
-  xla::ComputationDataHandle permuted = b->Transpose(reshaped, permutation);
+  xla::XlaOp permuted = xla::Transpose(reshaped, permutation);
 
   // 3. Reshape `permuted` to produce `reshaped_permuted` of shape
   //      [batch / prod(block_shape),
@@ -111,8 +110,8 @@ void BatchToSpace(XlaOpKernelContext* ctx,
   std::copy(remainder_shape.begin(), remainder_shape.end(),
             reshaped_permuted_shape.begin() + 1 + block_rank);
 
-  xla::ComputationDataHandle reshaped_permuted =
-      b->Reshape(permuted, reshaped_permuted_shape);
+  xla::XlaOp reshaped_permuted =
+      xla::Reshape(permuted, reshaped_permuted_shape);
 
   // 4. Crop the start and end of dimensions `[1, ..., M]` of
   //    `reshaped_permuted` according to `crops` to produce the output of shape:
@@ -125,9 +124,10 @@ void BatchToSpace(XlaOpKernelContext* ctx,
   //       input_shape[M+1], ..., input_shape[N-1]]
   std::vector<int64> start_indices(input_rank, 0);
   std::vector<int64> end_indices = reshaped_permuted_shape;
+  std::vector<int64> strides(input_rank, 1);
   for (int i = 0; i < block_rank; ++i) {
-    int64 crop_start = xla::LiteralUtil::Get<int64>(crops, {i, 0});
-    int64 crop_end = xla::LiteralUtil::Get<int64>(crops, {i, 1});
+    int64 crop_start = crops.Get<int64>({i, 0});
+    int64 crop_end = crops.Get<int64>({i, 1});
     OP_REQUIRES(ctx, crop_start >= 0 && crop_end >= 0,
                 errors::InvalidArgument("Crops must be non-negative"));
     start_indices[1 + i] = crop_start;
@@ -138,8 +138,8 @@ void BatchToSpace(XlaOpKernelContext* ctx,
             "Cropped size must be non-negative: start: ", crop_start,
             " end: ", crop_end, " size ", reshaped_permuted_shape[1 + i]));
   }
-  xla::ComputationDataHandle output =
-      b->Slice(reshaped_permuted, start_indices, end_indices);
+  xla::XlaOp output =
+      xla::Slice(reshaped_permuted, start_indices, end_indices, strides);
   ctx->SetOutput(0, output);
 }
 
@@ -158,7 +158,10 @@ class BatchToSpaceNDOp : public XlaOpKernel {
                  block_shape, crops);
   }
 };
-REGISTER_XLA_OP(Name("BatchToSpaceND"), BatchToSpaceNDOp);
+REGISTER_XLA_OP(Name("BatchToSpaceND")
+                    .CompileTimeConstantInput("block_shape")
+                    .CompileTimeConstantInput("crops"),
+                BatchToSpaceNDOp);
 
 class BatchToSpaceOp : public XlaOpKernel {
  public:
@@ -180,7 +183,8 @@ class BatchToSpaceOp : public XlaOpKernel {
  private:
   int block_size_;
 };
-REGISTER_XLA_OP(Name("BatchToSpace"), BatchToSpaceOp);
+REGISTER_XLA_OP(Name("BatchToSpace").CompileTimeConstantInput("crops"),
+                BatchToSpaceOp);
 
 }  // namespace
 }  // namespace tensorflow

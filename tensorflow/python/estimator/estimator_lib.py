@@ -1,4 +1,4 @@
-# Copyright 2017 The TensorFlow Authors. All Rights Reserved.
+# Copyright 2018 The TensorFlow Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,30 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""Estimator: High level tools for working with models."""
+"""estimator_lib python module.
+
+Importing from tensorflow.python.estimator is unsupported
+and will soon break!
+"""
+# pylint: disable=unused-import,g-bad-import-order,g-import-not-at-top,wildcard-import
 
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-# pylint: disable=unused-import,line-too-long
-from tensorflow.python.estimator.estimator import Estimator
-from tensorflow.python.estimator.export import export_lib as export
-from tensorflow.python.estimator.inputs import inputs
-from tensorflow.python.estimator.model_fn import EstimatorSpec
-from tensorflow.python.estimator.model_fn import ModeKeys
-from tensorflow.python.estimator.run_config import RunConfig
+from tensorflow_estimator.python.estimator import estimator_lib
 
-from tensorflow.python.util.all_util import remove_undocumented
-# pylint: enable=unused-import,line-too-long
-
-_allowed_symbols = [
-    'inputs',
-    'export',
-    'Estimator',
-    'EstimatorSpec',
-    'ModeKeys',
-    'RunConfig',
+# Include attrs that start with single underscore.
+_HAS_DYNAMIC_ATTRIBUTES = True
+estimator_lib.__all__ = [
+    s for s in dir(estimator_lib) if not s.startswith('__')
 ]
 
-remove_undocumented(__name__, allowed_exception_list=_allowed_symbols)
+from tensorflow_estimator.python.estimator.estimator_lib import *

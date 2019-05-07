@@ -16,6 +16,8 @@ limitations under the License.
 #ifndef TENSORFLOW_COMPILER_JIT_GRAPHCYCLES_GRAPHCYCLES_H_
 #define TENSORFLOW_COMPILER_JIT_GRAPHCYCLES_GRAPHCYCLES_H_
 
+#include <vector>
+
 // GraphCycles detects the introduction of a cycle into a directed
 // graph that is being built up incrementally.
 //
@@ -85,6 +87,9 @@ class GraphCycles {
   // and returns false.
   bool ContractEdge(int32 a, int32 b);
 
+  // Return true if can contract edge, otherwise return false.
+  bool CanContractEdge(int32 a, int32 b);
+
   // Return whether dest_node is reachable from source_node
   // by following edges.
   bool IsReachable(int32 source_node, int32 dest_node) const;
@@ -114,7 +119,17 @@ class GraphCycles {
   // Expensive: should only be called from graphcycles_test.cc.
   bool CheckInvariants() const;
 
-  std::unordered_set<int32> Successors(int32 node);
+  std::unordered_set<int32> Successors(int32 node) const;
+  std::unordered_set<int32> Predecessors(int32 node) const;
+
+  // Returns all nodes in post order.
+  //
+  // If there is a path from X to Y then X appears after Y in the
+  // returned vector.
+  std::vector<int32> AllNodesInPostOrder() const;
+
+  // Returns the graph in graphviz format.
+  string DebugString() const;
 
   // ----------------------------------------------------
   struct Rep;

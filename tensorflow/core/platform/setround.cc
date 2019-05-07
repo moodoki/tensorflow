@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "tensorflow/core/platform/setround.h"
 
+#include <cfenv>  // NOLINT
 
 namespace tensorflow {
 namespace port {

@@ -20,21 +20,21 @@ limitations under the License.
 #include <string>
 #include <utility>
 
+#include "absl/container/flat_hash_map.h"
 #include "tensorflow/compiler/xla/service/call_graph.h"
+#include "tensorflow/compiler/xla/service/hlo.pb.h"
+#include "tensorflow/compiler/xla/service/hlo_dataflow_analysis.h"
 #include "tensorflow/compiler/xla/service/hlo_instruction.h"
 #include "tensorflow/compiler/xla/service/hlo_module.h"
-#include "tensorflow/compiler/xla/service/tuple_points_to_analysis.h"
-#include "tensorflow/compiler/xla/statusor.h"
+#include "tensorflow/compiler/xla/service/hlo_reachability.h"
+#include "tensorflow/compiler/xla/service/hlo_schedule.h"
+#include "tensorflow/compiler/xla/service/hlo_value.h"
 #include "tensorflow/compiler/xla/types.h"
-#include "tensorflow/core/lib/core/status.h"
-#include "tensorflow/core/lib/gtl/flatmap.h"
-#include "tensorflow/core/lib/gtl/flatset.h"
 
 namespace xla {
 
-// Abstract base class for describing a partial ordering of HLO
-// instructions. Used to determine live range overlap of HLO instruction output
-// buffers.
+// Base class for describing a partial ordering of HLO instructions. Used to
+// determine live range overlap of HLO instruction output buffers.
 class HloOrdering {
  public:
   HloOrdering(const HloModule* module)
@@ -45,10 +45,31 @@ class HloOrdering {
   // not reflexive, that is, an instruction does not execute before itself.
   bool ExecutesBefore(const HloInstruction* a, const HloInstruction* b) const;
 
+  // Returns whether the value 'a' is defined before the value 'b' under the
+  // given ordering.
+  bool IsDefinedBefore(const HloValue& a, const HloValue& b) const;
+
+  // Returns whether the given use is before the given value definition under
+  // the given ordering.
+  bool UseIsBeforeValueDefinition(const HloUse& use, const HloValue& value,
+                                  const HloDataflowAnalysis& dataflow) const;
+  // Returns whether the given values interfere. Two values interfere if they
+  // may both be simultaneously live.
+  bool MayInterfere(const HloValue& a, const HloValue& b,
+                    const HloDataflowAnalysis& dataflow) const;
+
+  // Returns true if the live range of the given value 'a' is strictly before
+  // the live range of value 'b' using the given HLO ordering.
+  bool LiveRangeStrictlyBefore(const HloValue& a, const HloValue& b,
+                               const HloDataflowAnalysis& dataflow) const;
+
   // Returns the sequential instruction order for the given computation, or
   // nullptr if the computation does not have a sequential ordering.
-  virtual const std::vector<const HloInstruction*>* SequentialOrder(
+  virtual const HloInstructionSequence* SequentialOrder(
       const HloComputation& computation) const = 0;
+
+  // Return the call graph of the module used to compute ordering.
+  const CallGraph& call_graph() const { return *call_graph_; }
 
   virtual string ToString() const = 0;
 
@@ -57,7 +78,7 @@ class HloOrdering {
   // Precondition: 'a' and 'b' are in the same computation.
   //
   // Derived classes should implement this method for determining order of
-  // instructions in the same comptuation. ExecutesBefore() analyzes the
+  // instructions in the same computation. ExecutesBefore() analyzes the
   // callgraph and uses this method to determine ordering of instructions in
   // different computations.
   virtual bool ExecutesBeforeInSameComputation(
@@ -68,17 +89,25 @@ class HloOrdering {
   std::unique_ptr<CallGraph> call_graph_;
 };
 
-// Base class for partial orderings implemented by a map of strict predecessors
-// for each instruction. Subclasses should fill in strict_predecessors_.
+// Base class for partial orderings implemented by a map of predecessors for
+// each instruction. Subclasses should fill in predecessors_.
 class PredecessorHloOrdering : public HloOrdering {
  public:
   ~PredecessorHloOrdering() override = default;
 
   // Returns nullptr indicating the computation does not have a sequential
   // ordering.
-  const std::vector<const HloInstruction*>* SequentialOrder(
+  const HloInstructionSequence* SequentialOrder(
       const HloComputation& computation) const override {
     return nullptr;
+  }
+
+  HloReachabilityMap& reachability_map(const HloComputation* computation) {
+    return *predecessors_.at(computation);
+  }
+  const HloReachabilityMap& reachability_map(
+      const HloComputation* computation) const {
+    return *predecessors_.at(computation);
   }
 
  protected:
@@ -89,13 +118,12 @@ class PredecessorHloOrdering : public HloOrdering {
                                        const HloInstruction* b) const override;
 
   // For each computation in the module, this is the set of the instruction's
-  // strict predecessors. An instruction is not an element of its own strict
-  // predecessor set.
+  // predecessors. An instruction is an element of its own predecessor set.
   //
   // Subclasses should fill this in to define the desired ordering.
-  tensorflow::gtl::FlatMap<const HloComputation*,
-                           std::unique_ptr<HloComputation::ReachabilityMap>>
-      strict_predecessors_;
+  absl::flat_hash_map<const HloComputation*,
+                      std::unique_ptr<HloReachabilityMap>>
+      predecessors_;
 };
 
 // An HLO ordering based on data dependencies in the HLO graph. In this partial
@@ -153,26 +181,23 @@ class DependencyHloOrdering : public PredecessorHloOrdering {
 // interference is reduced relative to DependencyHloOrdering.
 class SequentialHloOrdering : public HloOrdering {
  public:
-  // A sequence of instructions for each computation in the module.
-  using HloModuleSequence =
-      tensorflow::gtl::FlatMap<const HloComputation*,
-                               std::vector<const HloInstruction*>>;
-
-  SequentialHloOrdering(const HloModule* module,
-                        const HloModuleSequence& module_sequence);
+  SequentialHloOrdering(const HloSchedule& schedule);
+  SequentialHloOrdering(HloSchedule&& schedule);
   ~SequentialHloOrdering() override = default;
 
   // Returns the sequential instruction order for the given computation.
-  const std::vector<const HloInstruction*>* SequentialOrder(
+  const HloInstructionSequence* SequentialOrder(
       const HloComputation& computation) const override;
 
   string ToString() const override;
 
  protected:
+  void Initialize();
+
   bool ExecutesBeforeInSameComputation(const HloInstruction* a,
                                        const HloInstruction* b) const override;
 
-  const HloModuleSequence module_sequence_;
+  const HloSchedule schedule_;
 
   // The position of every instruction in the HLO module in its respective
   // computation sequence (a value of zero indicates the instruction is first in
@@ -180,30 +205,8 @@ class SequentialHloOrdering : public HloOrdering {
   // this map so more than one instruction may have the same position
   // value. This is not a problem because ExecutesBefore also verifies
   // instructions are in the same computation.
-  tensorflow::gtl::FlatMap<const HloInstruction*, int> order_position_;
+  absl::flat_hash_map<const HloInstruction*, int> order_position_;
 };
-
-std::ostream& operator<<(
-    std::ostream& out,
-    const SequentialHloOrdering::HloModuleSequence& module_sequence);
-
-// Returns the minimum memory required to compute the given module sequence,
-// assuming no fragmentation.
-StatusOr<int64> MinimumMemoryForSequence(
-    const SequentialHloOrdering::HloModuleSequence& module_sequence,
-    const LogicalBuffer::SizeFunction& size_function);
-
-// Returns an HloModuleSequence which seeks to minimize the memory required for
-// the computation. size_function is the function returning the number of bytes
-// required for a LogicalBuffer.
-StatusOr<SequentialHloOrdering::HloModuleSequence>
-CreateMemoryMinimizingSequence(
-    const HloModule& module, const LogicalBuffer::SizeFunction& size_function);
-
-// Overload of above that computes the sequence for a single computation.
-StatusOr<std::vector<const HloInstruction*>> CreateMemoryMinimizingSequence(
-    const HloComputation& computation,
-    const LogicalBuffer::SizeFunction& size_function);
 
 }  // namespace xla
 

@@ -10,24 +10,12 @@ exports_files(["LICENSE"])
 
 # vardef("PYTHON_BIN_PATH", "/usr/bin/python")
 
-filegroup(
-    name = "all_files",
-    srcs = glob(
-        ["**/*"],
-        exclude = [
-            "**/METADATA",
-            "**/OWNERS",
-            "g3doc/sitemap.md",
-        ],
-    ),
-    visibility = ["//visibility:public"],
-)
-
 py_binary(
     name = "export_half_plus_two",
     srcs = [
         "export_half_plus_two.py",
     ],
+    python_version = "PY2",
     srcs_version = "PY2AND3",
     deps = [
         "//tensorflow:tensorflow_py",

@@ -31,12 +31,14 @@ py_library(
         "//tensorflow/python:framework_for_generated_wrappers",
         "//tensorflow/python:math_ops",
         "//tensorflow/python:nn",
+        "//tensorflow/python:platform",
+        "//tensorflow/python:util",
     ],
 )
 
 cuda_py_tests(
     name = "sparsemax_test",
-    size = "small",
+    size = "medium",
     srcs = ["python/kernel_tests/sparsemax_test.py"],
     additional_deps = [
         ":sparsemax_py",
@@ -46,6 +48,9 @@ cuda_py_tests(
         "//tensorflow/python:gradients",
         "//tensorflow/python:math_ops",
         "//tensorflow/python:platform_test",
+    ],
+    tags = [
+        "oss_serial",
     ],
 )
 
@@ -62,16 +67,7 @@ cuda_py_tests(
         "//tensorflow/python:math_ops",
         "//tensorflow/python:platform_test",
     ],
-)
-
-filegroup(
-    name = "all_files",
-    srcs = glob(
-        ["**/*"],
-        exclude = [
-            "**/METADATA",
-            "**/OWNERS",
-        ],
-    ),
-    visibility = ["//tensorflow:__subpackages__"],
+    tags = [
+        "oss_serial",
+    ],
 )

@@ -49,13 +49,16 @@ class RemoteDeviceTest : public ::testing::Test {
     TF_CHECK_OK(spec.AddHostPortsJob("localhost", {hostport}));
     ChannelCreationFunction channel_func =
         ConvertToChannelCreationFunction(NewHostPortGrpcChannel);
-    worker_cache_.reset(
-        NewGrpcWorkerCache(NewGrpcChannelCache(spec, channel_func)));
+    std::shared_ptr<GrpcChannelCache> channel_cache(
+        NewGrpcChannelCache(spec, channel_func));
+    worker_cache_.reset(NewGrpcWorkerCache(channel_cache));
     remote_name_ = "/job:localhost/replica:0/task:0";
     wi_ = worker_cache_->CreateWorker(remote_name_);
   }
 
-  ~RemoteDeviceTest() { worker_cache_->ReleaseWorker(remote_name_, wi_); }
+  ~RemoteDeviceTest() override {
+    worker_cache_->ReleaseWorker(remote_name_, wi_);
+  }
 
   void SetUp() override {
     Notification n;

@@ -16,11 +16,11 @@ limitations under the License.
 #ifndef TENSORFLOW_COMPILER_XLA_SERVICE_CPU_COMPILER_FUNCTOR_H_
 #define TENSORFLOW_COMPILER_XLA_SERVICE_CPU_COMPILER_FUNCTOR_H_
 
-#include "external/llvm/include/llvm/IR/LegacyPassManager.h"
-#include "external/llvm/include/llvm/IR/Module.h"
-#include "external/llvm/include/llvm/Object/ObjectFile.h"
-#include "external/llvm/include/llvm/Target/TargetMachine.h"
-#include "tensorflow/compiler/xla/service/cpu/disassembler.h"
+#include "llvm/IR/LegacyPassManager.h"
+#include "llvm/IR/Module.h"
+#include "llvm/Object/ObjectFile.h"
+#include "llvm/Target/TargetMachine.h"
+#include "tensorflow/compiler/xla/service/llvm_compiler.h"
 #include "tensorflow/core/platform/logging.h"
 
 namespace xla {
@@ -30,37 +30,42 @@ namespace cpu {
 // Orc JIT compile layer.
 class CompilerFunctor {
  public:
-  // Describes the set of vector intrinsics available to the generated code.
-  struct VectorIntrinsics {
-    bool sse_intrinsics;
-    bool avx_intrinsics;
-  };
-
-  // Returns a VectorIntrinsics where all intrinsics are available.
-  static VectorIntrinsics AllIntrinsics();
-
-  explicit CompilerFunctor(llvm::TargetMachine* target_machine,
-                           const Disassembler* disassembler, int opt_level,
-                           const VectorIntrinsics& available_intrinsics)
+  explicit CompilerFunctor(
+      llvm::TargetMachine* target_machine, int opt_level,
+      bool optimize_for_size, bool disable_expensive_passes,
+      LLVMCompiler::ModuleHook pre_optimization_hook = nullptr,
+      LLVMCompiler::ModuleHook post_optimization_hook = nullptr,
+      std::function<void(const llvm::object::ObjectFile&)> post_codegen_hook =
+          nullptr)
       : target_machine_(target_machine),
-        disassembler_(CHECK_NOTNULL(disassembler)),
         opt_level_(opt_level),
-        available_intrinsics_(available_intrinsics) {}
+        optimize_for_size_(optimize_for_size),
+        disable_expensive_passes_(disable_expensive_passes),
+        pre_optimization_hook_(std::move(pre_optimization_hook)),
+        post_optimization_hook_(std::move(post_optimization_hook)),
+        post_codegen_hook_(std::move(post_codegen_hook)) {}
 
   // Compile a Module to an ObjectFile.
-  llvm::object::OwningBinary<llvm::object::ObjectFile> operator()(
+  std::unique_ptr<llvm::MemoryBuffer> operator()(
       llvm::Module& module) const;  // NOLINT
 
  private:
+  // Populates the given pass manager with TargetLibraryInfo and
+  // TargetTransformInfo passes.
+  void AddTargetInfoPasses(llvm::legacy::PassManagerBase* passes) const;
+
   // Populates the given pass managers based on the optimization level.
-  void AddOptimizationPasses(
-      llvm::legacy::PassManagerBase* module_passes,
-      llvm::legacy::FunctionPassManager* function_passes) const;
+  void AddOptimizationPasses(llvm::legacy::PassManagerBase* module_passes,
+                             llvm::legacy::FunctionPassManager* function_passes,
+                             unsigned opt_level, unsigned size_level) const;
 
   llvm::TargetMachine* target_machine_;
-  const Disassembler* disassembler_;
   const unsigned opt_level_;
-  const VectorIntrinsics available_intrinsics_;
+  const bool optimize_for_size_;
+  const bool disable_expensive_passes_;
+  LLVMCompiler::ModuleHook pre_optimization_hook_;
+  LLVMCompiler::ModuleHook post_optimization_hook_;
+  std::function<void(const llvm::object::ObjectFile&)> post_codegen_hook_;
 };
 
 }  // namespace cpu

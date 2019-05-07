@@ -19,15 +19,16 @@ from __future__ import division
 from __future__ import print_function
 
 from tensorflow.contrib.distributions.python.ops import logistic
+from tensorflow.contrib.distributions.python.ops.bijectors.sigmoid import Sigmoid
 # Bijectors must be directly imported because `remove_undocumented` prevents
 # individual file imports.
-from tensorflow.contrib.distributions.python.ops.bijectors.sigmoid import Sigmoid
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import check_ops
 from tensorflow.python.ops.distributions import transformed_distribution
 from tensorflow.python.ops.distributions import util as distribution_util
+from tensorflow.python.util import deprecation
 
 
 class RelaxedBernoulli(transformed_distribution.TransformedDistribution):
@@ -35,10 +36,10 @@ class RelaxedBernoulli(transformed_distribution.TransformedDistribution):
 
   The RelaxedBernoulli is a distribution over the unit interval (0,1), which
   continuously approximates a Bernoulli. The degree of approximation is
-  controlled by a temperature: as the temperaturegoes to 0 the RelaxedBernoulli
-  becomes discrete with a distribution described by the `logits` or `probs`
-  parameters, as the temperature goes to infinity the RelaxedBernoulli
-  becomes the constant distribution that is identically 0.5.
+  controlled by a temperature: as the temperature goes to 0 the
+  RelaxedBernoulli becomes discrete with a distribution described by the
+  `logits` or `probs` parameters, as the temperature goes to infinity the
+  RelaxedBernoulli becomes the constant distribution that is identically 0.5.
 
   The RelaxedBernoulli distribution is a reparameterized continuous
   distribution that is the binary special case of the RelaxedOneHotCategorical
@@ -52,7 +53,7 @@ class RelaxedBernoulli(transformed_distribution.TransformedDistribution):
   the RelaxedBernoulli can suffer from underflow issues. In many case loss
   functions such as these are invariant under invertible transformations of
   the random variables. The KL divergence, found in the variational autoencoder
-  loss, is an example. Because RelaxedBernoullis are sampled by by a Logistic
+  loss, is an example. Because RelaxedBernoullis are sampled by a Logistic
   random variable followed by a `tf.sigmoid` op, one solution is to treat
   the Logistic as the random variable and `tf.sigmoid` as downstream. The
   KL divergences of two Logistics, which are always followed by a `tf.sigmoid`
@@ -131,6 +132,14 @@ class RelaxedBernoulli(transformed_distribution.TransformedDistribution):
   Gumbel-Softmax. 2016.
   """
 
+  @deprecation.deprecated(
+      "2018-10-01",
+      "The TensorFlow Distributions library has moved to "
+      "TensorFlow Probability "
+      "(https://github.com/tensorflow/probability). You "
+      "should update all references to use `tfp.distributions` "
+      "instead of `tf.contrib.distributions`.",
+      warn_once=True)
   def __init__(self,
                temperature,
                logits=None,
@@ -165,8 +174,8 @@ class RelaxedBernoulli(transformed_distribution.TransformedDistribution):
     Raises:
       ValueError: If both `probs` and `logits` are passed, or if neither.
     """
-    parameters = locals()
-    with ops.name_scope(name, values=[logits, probs, temperature]):
+    parameters = dict(locals())
+    with ops.name_scope(name, values=[logits, probs, temperature]) as name:
       with ops.control_dependencies([check_ops.assert_positive(temperature)]
                                     if validate_args else []):
         self._temperature = array_ops.identity(temperature, name="temperature")

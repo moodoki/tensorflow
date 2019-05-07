@@ -14,7 +14,14 @@ limitations under the License.
 ==============================================================================*/
 
 #include "tensorflow/compiler/xla/protobuf_util.h"
+
+#include "tensorflow/compiler/xla/status_macros.h"
 #include "tensorflow/compiler/xla/types.h"
+#include "tensorflow/compiler/xla/util.h"
+#include "tensorflow/core/lib/io/path.h"
+#include "tensorflow/core/platform/env.h"
+#include "tensorflow/core/platform/mutex.h"
+#include "tensorflow/core/platform/protobuf.h"
 
 namespace xla {
 namespace protobuf_util {
@@ -29,6 +36,15 @@ bool ProtobufEquals(const tensorflow::protobuf::Message& m1,
   m1.AppendToString(&serialized1);
   m2.AppendToString(&serialized2);
   return (serialized1 == serialized2);
+}
+
+Status DumpProtoToDirectory(const tensorflow::protobuf::Message& message,
+                            const string& directory, const string& file_name) {
+  tensorflow::Env* env = tensorflow::Env::Default();
+  TF_RETURN_IF_ERROR(env->RecursivelyCreateDir(directory));
+  string safe_file_name = SanitizeFileName(file_name) + ".pb";
+  const string path = tensorflow::io::JoinPath(directory, safe_file_name);
+  return tensorflow::WriteBinaryProto(env, path, message);
 }
 
 }  // namespace protobuf_util

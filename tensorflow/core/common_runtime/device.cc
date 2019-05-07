@@ -30,7 +30,13 @@ Device::Device(Env* env, const DeviceAttributes& device_attributes)
   rmgr_ = new ResourceMgr(parsed_name_.job);
 }
 
-Device::~Device() { delete rmgr_; }
+Device::~Device() {
+  if (rmgr_ != nullptr) {
+    DeleteResourceMgr();
+  }
+}
+
+void Device::Sync(const DoneCallback& done) { done(Sync()); }
 
 // static
 DeviceAttributes Device::BuildDeviceAttributes(

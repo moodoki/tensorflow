@@ -17,6 +17,8 @@ limitations under the License.
 
 #include "tensorflow/contrib/verbs/verbs_server_lib.h"
 
+#include "grpc/support/alloc.h"
+
 #include "tensorflow/contrib/verbs/rdma_mgr.h"
 #include "tensorflow/contrib/verbs/rdma_rendezvous_mgr.h"
 #include "tensorflow/core/distributed_runtime/server_lib.h"
@@ -30,6 +32,8 @@ namespace {
 RendezvousMgrInterface* NewRdmaRendezvousMgr(const WorkerEnv* env) {
   return new RdmaRendezvousMgr(env);
 }
+
+std::once_flag reg_mem_visitors_call;
 
 }  // namespace
 
@@ -76,7 +80,11 @@ Status VerbsServer::ChannelCacheFactory(const ServerDef& server_def,
 
 Status VerbsServer::Init(ServiceInitFunction service_func,
                          RendezvousMgrCreationFunction rendezvous_mgr_func) {
-  Status s = GrpcServer::Init(service_func, rendezvous_mgr_func);
+  std::call_once(reg_mem_visitors_call, []() { RdmaMgr::RegMemVisitors(); });
+  GrpcServerOptions opts;
+  opts.service_func = service_func;
+  opts.rendezvous_mgr_func = rendezvous_mgr_func;
+  Status s = GrpcServer::Init(opts);
   {
     mutex_lock l(mu_);
     CHECK_EQ(verbs_state_, DISCONNECTED);
@@ -101,6 +109,8 @@ Status VerbsServer::Start() {
           ThreadOptions(), "TF_verbs_service",
           [this] { verbs_service_->HandleRPCsLoop(); }));
       rdma_mgr_->SetupChannels();
+      CHECK(rdma_mgr_->ConnectivityCheck()) << "Connectivity check failed!";
+      rdma_mgr_->InitAllocators();
       verbs_state_ = CONNECTED;
     }
   }

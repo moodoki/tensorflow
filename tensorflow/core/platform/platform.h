@@ -40,12 +40,14 @@ limitations under the License.
 #elif defined(_WIN32)
 #define PLATFORM_WINDOWS
 
-#elif defined(__arm__)
+#elif defined(__arm__) || defined(__EMSCRIPTEN__)
 #define PLATFORM_POSIX
 
-// Since there's no macro for the Raspberry Pi, assume we're on a mobile
-// platform if we're compiling for the ARM CPU.
+// Require an outside macro to tell us if we're building for Raspberry Pi or
+// another ARM device that's not a mobile platform.
+#if !defined(RASPBERRY_PI) && !defined(ARM_NON_MOBILE)
 #define IS_MOBILE_PLATFORM
+#endif  // !defined(RASPBERRY_PI) && !defined(ARM_NON_MOBILE)
 
 #else
 // If no platform specified, use:

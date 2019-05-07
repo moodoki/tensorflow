@@ -1,4 +1,4 @@
-# Copyright 2017 The TensorFlow Authors. All Rights Reserved.
+# Copyright 2018 The TensorFlow Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,30 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""Enum for model prediction keys."""
+"""metric_keys python module.
+
+Importing from tensorflow.python.estimator is unsupported
+and will soon break!
+"""
+# pylint: disable=unused-import,g-bad-import-order,g-import-not-at-top,wildcard-import
 
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-from tensorflow.python.estimator import model_fn
+from tensorflow_estimator.python.estimator.canned import metric_keys
 
+# Include attrs that start with single underscore.
+_HAS_DYNAMIC_ATTRIBUTES = True
+metric_keys.__all__ = [s for s in dir(metric_keys) if not s.startswith('__')]
 
-# TODO(pucker): Merge with model_fn.MetricKeys once we've worked out out naming
-# conventions.
-class MetricKeys(object):
-  """Metric key strings."""
-  LOSS = model_fn.MetricKeys.LOSS
-  LOSS_MEAN = model_fn.MetricKeys.AVERAGE_LOSS
-
-  ACCURACY = 'accuracy'
-  ACCURACY_BASELINE = 'accuracy_baseline'
-  AUC = 'auc'
-  AUC_PR = 'auc_precision_recall'
-  LABEL_MEAN = 'label/mean'
-  PREDICTION_MEAN = 'prediction/mean'
-
-  # The following require a threshold applied, should be float in range (0, 1).
-  ACCURACY_AT_THRESHOLD = 'accuracy/positive_threshold_%g'
-  PRECISION_AT_THRESHOLD = 'precision/positive_threshold_%g'
-  RECALL_AT_THRESHOLD = 'recall/positive_threshold_%g'
+from tensorflow_estimator.python.estimator.canned.metric_keys import *

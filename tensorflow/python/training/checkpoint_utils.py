@@ -20,20 +20,26 @@ from __future__ import print_function
 
 import six
 
+from tensorflow.python import pywrap_tensorflow
+from tensorflow.python.distribute import distribution_strategy_context
+from tensorflow.python.framework import ops
 from tensorflow.python.ops import io_ops
-from tensorflow.python.ops import state_ops
+from tensorflow.python.ops import resource_variable_ops
 from tensorflow.python.ops import variable_scope as vs
 from tensorflow.python.ops import variables
 from tensorflow.python.platform import gfile
 from tensorflow.python.platform import tf_logging as logging
-from tensorflow.python.training import saver
-from tensorflow.python.training import training as train
+from tensorflow.python.training import checkpoint_management
+from tensorflow.python.training.saving import saveable_object_util
+from tensorflow.python.util.tf_export import tf_export
+
 
 __all__ = [
     "load_checkpoint", "load_variable", "list_variables", "init_from_checkpoint"
 ]
 
 
+@tf_export("train.load_checkpoint")
 def load_checkpoint(ckpt_dir_or_file):
   """Returns `CheckpointReader` for checkpoint found in `ckpt_dir_or_file`.
 
@@ -55,9 +61,10 @@ def load_checkpoint(ckpt_dir_or_file):
   if filename is None:
     raise ValueError("Couldn't find 'checkpoint' file or checkpoints in "
                      "given directory %s" % ckpt_dir_or_file)
-  return train.NewCheckpointReader(filename)
+  return pywrap_tensorflow.NewCheckpointReader(filename)
 
 
+@tf_export("train.load_variable")
 def load_variable(ckpt_dir_or_file, name):
   """Returns the tensor value of the given variable in the checkpoint.
 
@@ -75,6 +82,7 @@ def load_variable(ckpt_dir_or_file, name):
   return reader.get_tensor(name)
 
 
+@tf_export("train.list_variables")
 def list_variables(ckpt_dir_or_file):
   """Returns list of all variables in the checkpoint.
 
@@ -93,8 +101,12 @@ def list_variables(ckpt_dir_or_file):
   return result
 
 
+@tf_export(v1=["train.init_from_checkpoint"])
 def init_from_checkpoint(ckpt_dir_or_file, assignment_map):
-  """Initializes current variables with tensors loaded from given checkpoint.
+  """Replaces `tf.Variable` initializers so they load from a checkpoint file.
+
+  Values are not loaded immediately, but when the initializer is run
+  (typically by running a `tf.compat.v1.global_variables_initializer` op).
 
   Note: This overrides default initialization ops of specified variables and
   redefines dtype.
@@ -127,19 +139,19 @@ def init_from_checkpoint(ckpt_dir_or_file, assignment_map):
   #  -- name='old_scope_2/var3', shape=[100, 100]
 
   # Create new model's variables
-  with tf.variable_scope('new_scope_1'):
-    var1 = tf.get_variable('var1', shape=[20, 2],
-                           initializer=tf.zeros_initializer())
-  with tf.variable_scope('new_scope_2'):
-    var2 = tf.get_variable('var2', shape=[50, 4],
-                           initializer=tf.zeros_initializer())
+  with tf.compat.v1.variable_scope('new_scope_1'):
+    var1 = tf.compat.v1.get_variable('var1', shape=[20, 2],
+                           initializer=tf.compat.v1.zeros_initializer())
+  with tf.compat.v1.variable_scope('new_scope_2'):
+    var2 = tf.compat.v1.get_variable('var2', shape=[50, 4],
+                           initializer=tf.compat.v1.zeros_initializer())
     # Partition into 5 variables along the first axis.
-    var3 = tf.get_variable(name='var3', shape=[100, 100],
-                           initializer=tf.zeros_initializer(),
+    var3 = tf.compat.v1.get_variable(name='var3', shape=[100, 100],
+                           initializer=tf.compat.v1.zeros_initializer(),
                            partitioner=lambda shape, dtype: [5, 1])
 
   # Initialize all variables in `new_scope_1` from `old_scope_1`.
-  init_from_checkpoint('/tmp/model.ckpt', {'old_scope_1/', 'new_scope_1'})
+  init_from_checkpoint('/tmp/model.ckpt', {'old_scope_1/': 'new_scope_1'})
 
   # Use names to specify which variables to initialize from checkpoint.
   init_from_checkpoint('/tmp/model.ckpt',
@@ -168,20 +180,31 @@ def init_from_checkpoint(ckpt_dir_or_file, assignment_map):
       (in default graph).
 
   Raises:
-    tf.errors.OpError: If missing checkpoints or tensors in checkpoints.
-    ValueError: If missing variables in current graph.
+    ValueError: If missing variables in current graph, or if missing
+      checkpoints or tensors in checkpoints.
   """
+  init_from_checkpoint_fn = lambda _: _init_from_checkpoint(
+      ckpt_dir_or_file, assignment_map)
+  if distribution_strategy_context.get_cross_replica_context():
+    init_from_checkpoint_fn(None)
+  else:
+    distribution_strategy_context.get_replica_context().merge_call(
+        init_from_checkpoint_fn)
+
+
+def _init_from_checkpoint(ckpt_dir_or_file, assignment_map):
+  """See `init_from_checkpoint` for documentation."""
   ckpt_file = _get_checkpoint_filename(ckpt_dir_or_file)
   reader = load_checkpoint(ckpt_dir_or_file)
   variable_map = reader.get_variable_to_shape_map()
-  for tensor_name_in_ckpt, current_var_or_name in six.iteritems(assignment_map):
+  for tensor_name_in_ckpt, current_var_or_name in sorted(
+      six.iteritems(assignment_map)):
     var = None
     # Check if this is Variable object or list of Variable objects (in case of
     # partitioned variables).
-    is_var = lambda x: isinstance(x, variables.Variable)
-    if is_var(current_var_or_name) or (
+    if _is_variable(current_var_or_name) or (
         isinstance(current_var_or_name, list)
-        and all(is_var(v) for v in current_var_or_name)):
+        and all(_is_variable(v) for v in current_var_or_name)):
       var = current_var_or_name
     else:
       store_vars = vs._get_default_variable_store()._vars  # pylint:disable=protected-access
@@ -196,7 +219,7 @@ def init_from_checkpoint(ckpt_dir_or_file, assignment_map):
         raise ValueError("Tensor %s is not found in %s checkpoint %s" % (
             tensor_name_in_ckpt, ckpt_dir_or_file, variable_map
         ))
-      if is_var(var):
+      if _is_variable(var):
         # Additional at-call-time checks.
         if not var.get_shape().is_compatible_with(
             variable_map[tensor_name_in_ckpt]):
@@ -210,8 +233,8 @@ def init_from_checkpoint(ckpt_dir_or_file, assignment_map):
       else:
         var_name = ",".join([v.name for v in var])
       _set_variable_or_list_initializer(var, ckpt_file, tensor_name_in_ckpt)
-      logging.info("Initialize variable %s from checkpoint %s with %s",
-                   var_name, ckpt_dir_or_file, tensor_name_in_ckpt)
+      logging.debug("Initialize variable %s from checkpoint %s with %s",
+                    var_name, ckpt_dir_or_file, tensor_name_in_ckpt)
     else:
       scopes = ""
       # TODO(vihanjain): Support list of 'current_var_or_name' here.
@@ -231,7 +254,7 @@ def init_from_checkpoint(ckpt_dir_or_file, assignment_map):
           if "/part_" in var_name:
             var_name = var_name[:var_name.index("/part_")]
           scope_variables.add(var_name)
-      for var_name in scope_variables:
+      for var_name in sorted(scope_variables):
         # Lookup name with specified prefix and suffix from current variable.
         # If tensor_name given is '/' (root), don't use it for full name.
         full_tensor_name = var_name[len(scopes):]
@@ -239,6 +262,9 @@ def init_from_checkpoint(ckpt_dir_or_file, assignment_map):
           full_tensor_name = full_tensor_name[1:]
         if tensor_name_in_ckpt != "/":
           full_tensor_name = tensor_name_in_ckpt + full_tensor_name
+        # Remove trailing '/', if any, in the full_tensor_name
+        if full_tensor_name.endswith("/"):
+          full_tensor_name = full_tensor_name[:-1]
         if full_tensor_name not in variable_map:
           raise ValueError(
               "Tensor %s (%s in %s) is not found in %s checkpoint" % (
@@ -249,14 +275,14 @@ def init_from_checkpoint(ckpt_dir_or_file, assignment_map):
         if var is None:
           var = _collect_partitioned_variable(var_name, store_vars)
         _set_variable_or_list_initializer(var, ckpt_file, full_tensor_name)
-        logging.info("Initialize variable %s from checkpoint %s with %s",
-                     var_name, ckpt_dir_or_file, full_tensor_name)
+        logging.debug("Initialize variable %s from checkpoint %s with %s",
+                      var_name, ckpt_dir_or_file, full_tensor_name)
 
 
 def _get_checkpoint_filename(ckpt_dir_or_file):
   """Returns checkpoint filename given directory or specific checkpoint file."""
   if gfile.IsDirectory(ckpt_dir_or_file):
-    return saver.latest_checkpoint(ckpt_dir_or_file)
+    return checkpoint_management.latest_checkpoint(ckpt_dir_or_file)
   return ckpt_dir_or_file
 
 
@@ -278,9 +304,28 @@ def _set_checkpoint_initializer(variable,
     name: Name of the operation.
   """
   base_type = variable.dtype.base_dtype
-  restore_op = io_ops.restore_v2(
-      ckpt_file, [tensor_name], [slice_spec], [base_type], name=name)[0]
-  variable._initializer_op = state_ops.assign(variable, restore_op)  # pylint:disable=protected-access
+  # Do not colocate with variable since RestoreV2 op only runs on CPU and
+  # colocation will force variable (and other ops that colocate with variable)
+  # to be on CPU as well. It is okay to place the variable's initializer op on
+  # CPU since it will only be run once at the start.
+  with ops.device(variable.device), ops.device("/cpu:0"):
+    restore_op = io_ops.restore_v2(
+        ckpt_file, [tensor_name], [slice_spec], [base_type], name=name)[0]
+
+    names_to_saveables = saveable_object_util.op_list_to_dict([variable])
+    saveable_objects = []
+    for name, op in names_to_saveables.items():
+      for s in saveable_object_util.saveable_objects_for_op(op, name):
+        saveable_objects.append(s)
+
+    assert len(saveable_objects) == 1  # Should be only one variable.
+  init_op = saveable_objects[0].restore([restore_op], restored_shapes=None)
+
+  # pylint:disable=protected-access
+  variable._initializer_op = init_op
+  restore_op.set_shape(variable.shape)
+  variable._initial_value = restore_op
+  # pylint:enable=protected-access
 
 
 def _set_variable_or_list_initializer(variable_or_list, ckpt_file,
@@ -313,6 +358,10 @@ def _set_variable_or_list_initializer(variable_or_list, ckpt_file,
   else:
     _set_checkpoint_initializer(variable_or_list, ckpt_file, tensor_name, "")
 
+
+def _is_variable(x):
+  return (isinstance(x, variables.Variable) or
+          resource_variable_ops.is_resource_variable(x))
 
 def _collect_partitioned_variable(name, all_vars):
   """Returns list of `tf.Variable` that comprise the partitioned variable."""

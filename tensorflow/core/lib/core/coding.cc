@@ -15,7 +15,7 @@ limitations under the License.
 
 #include "tensorflow/core/lib/core/coding.h"
 
-#include "tensorflow/core/platform/cpu_info.h"
+#include "tensorflow/core/platform/byte_order.h"
 
 namespace tensorflow {
 namespace core {
@@ -133,6 +133,17 @@ int VarintLength(uint64_t v) {
   return len;
 }
 
+const char* GetVarint32Ptr(const char* p, const char* limit, uint32* value) {
+  if (p < limit) {
+    uint32 result = *(reinterpret_cast<const unsigned char*>(p));
+    if ((result & 128) == 0) {
+      *value = result;
+      return p + 1;
+    }
+  }
+  return GetVarint32PtrFallback(p, limit, value);
+}
+
 const char* GetVarint32PtrFallback(const char* p, const char* limit,
                                    uint32* value) {
   uint32 result = 0;
@@ -148,14 +159,14 @@ const char* GetVarint32PtrFallback(const char* p, const char* limit,
       return reinterpret_cast<const char*>(p);
     }
   }
-  return NULL;
+  return nullptr;
 }
 
 bool GetVarint32(StringPiece* input, uint32* value) {
   const char* p = input->data();
   const char* limit = p + input->size();
   const char* q = GetVarint32Ptr(p, limit, value);
-  if (q == NULL) {
+  if (q == nullptr) {
     return false;
   } else {
     *input = StringPiece(q, limit - q);
@@ -177,14 +188,14 @@ const char* GetVarint64Ptr(const char* p, const char* limit, uint64* value) {
       return reinterpret_cast<const char*>(p);
     }
   }
-  return NULL;
+  return nullptr;
 }
 
 bool GetVarint64(StringPiece* input, uint64* value) {
   const char* p = input->data();
   const char* limit = p + input->size();
   const char* q = GetVarint64Ptr(p, limit, value);
-  if (q == NULL) {
+  if (q == nullptr) {
     return false;
   } else {
     *input = StringPiece(q, limit - q);

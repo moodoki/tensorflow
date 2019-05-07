@@ -20,15 +20,18 @@ py_library(
         "//tensorflow/python:array_ops",
         "//tensorflow/python:control_flow_ops",
         "//tensorflow/python:framework_for_generated_wrappers",
+        "//tensorflow/python:functional_ops",
         "//tensorflow/python:math_ops",
         "//tensorflow/python:tensor_array_ops",
         "//tensorflow/python:util",
+        "@six_archive//:six",
     ],
 )
 
 py_test(
     name = "odes_test",
     srcs = ["python/ops/odes_test.py"],
+    python_version = "PY2",
     srcs_version = "PY2AND3",
     deps = [
         ":integrate_py",
@@ -39,15 +42,4 @@ py_test(
         "//tensorflow/python:math_ops",
         "//third_party/py/numpy",
     ],
-)
-
-filegroup(
-    name = "all_files",
-    srcs = glob(
-        ["**/*"],
-        exclude = [
-            "**/METADATA",
-            "**/OWNERS",
-        ],
-    ),
 )

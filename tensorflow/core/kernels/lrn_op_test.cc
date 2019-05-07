@@ -18,7 +18,6 @@ limitations under the License.
 
 #include "tensorflow/core/framework/allocator.h"
 #include "tensorflow/core/framework/fake_input.h"
-#include "tensorflow/core/framework/graph.pb.h"
 #include "tensorflow/core/framework/node_def_builder.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/tensor.h"
@@ -72,7 +71,7 @@ class LRNFloatTest : public OpsTestBase {
       Eigen::Tensor<float, 1, Eigen::RowMajor> out_col(depth);
       for (int64 d = 0; d < depth; ++d) {
         float denom = 0.0f;
-        for (int64 r = std::max(0ll, d - depth_radius);
+        for (int64 r = std::max(int64{0}, d - depth_radius);
              r < std::min(depth, d + depth_radius + 1); ++r) {
           denom += in(i, r) * in(i, r);
         }
@@ -103,7 +102,7 @@ TEST_F(LRNFloatTest, Depth96) {
                    .Finalize(node_def()));
   TF_ASSERT_OK(InitOp());
   AddInput<float>(TensorShape({1, 1, 1, 96}),
-                  [this](int i) -> float { return i + 1; });
+                  [](int i) -> float { return i + 1; });
   TF_ASSERT_OK(RunOpKernel());
   auto actual = GetOutput(0)->tensor<float, 4>();
 
@@ -139,7 +138,7 @@ TEST_F(LRNFloatTest, Depth16) {
                    .Finalize(node_def()));
   TF_ASSERT_OK(InitOp());
   AddInput<float>(TensorShape({1, 1, 1, 16}),
-                  [this](int i) -> float { return i + 1; });
+                  [](int i) -> float { return i + 1; });
   TF_ASSERT_OK(RunOpKernel());
   auto actual = GetOutput(0)->tensor<float, 4>();
 

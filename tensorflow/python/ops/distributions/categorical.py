@@ -29,33 +29,108 @@ from tensorflow.python.ops import random_ops
 from tensorflow.python.ops.distributions import distribution
 from tensorflow.python.ops.distributions import kullback_leibler
 from tensorflow.python.ops.distributions import util as distribution_util
+from tensorflow.python.util import deprecation
+from tensorflow.python.util.tf_export import tf_export
 
 
+def _broadcast_cat_event_and_params(event, params, base_dtype):
+  """Broadcasts the event or distribution parameters."""
+  if event.dtype.is_integer:
+    pass
+  elif event.dtype.is_floating:
+    # When `validate_args=True` we've already ensured int/float casting
+    # is closed.
+    event = math_ops.cast(event, dtype=dtypes.int32)
+  else:
+    raise TypeError("`value` should have integer `dtype` or "
+                    "`self.dtype` ({})".format(base_dtype))
+  shape_known_statically = (
+      params.shape.ndims is not None and
+      params.shape[:-1].is_fully_defined() and
+      event.shape.is_fully_defined())
+  if not shape_known_statically or params.shape[:-1] != event.shape:
+    params *= array_ops.ones_like(event[..., array_ops.newaxis],
+                                  dtype=params.dtype)
+    params_shape = array_ops.shape(params)[:-1]
+    event *= array_ops.ones(params_shape, dtype=event.dtype)
+    if params.shape.ndims is not None:
+      event.set_shape(tensor_shape.TensorShape(params.shape[:-1]))
+
+  return event, params
+
+
+@tf_export(v1=["distributions.Categorical"])
 class Categorical(distribution.Distribution):
   """Categorical distribution.
 
-  The categorical distribution is parameterized by the log-probabilities
-  of a set of classes.
+  The Categorical distribution is parameterized by either probabilities or
+  log-probabilities of a set of `K` classes. It is defined over the integers
+  `{0, 1, ..., K}`.
+
+  The Categorical distribution is closely related to the `OneHotCategorical` and
+  `Multinomial` distributions.  The Categorical distribution can be intuited as
+  generating samples according to `argmax{ OneHotCategorical(probs) }` itself
+  being identical to `argmax{ Multinomial(probs, total_count=1) }`.
+
+  #### Mathematical Details
+
+  The probability mass function (pmf) is,
+
+  ```none
+  pmf(k; pi) = prod_j pi_j**[k == j]
+  ```
+
+  #### Pitfalls
+
+  The number of classes, `K`, must not exceed:
+  - the largest integer representable by `self.dtype`, i.e.,
+    `2**(mantissa_bits+1)` (IEEE 754),
+  - the maximum `Tensor` index, i.e., `2**31-1`.
+
+  In other words,
+
+  ```python
+  K <= min(2**31-1, {
+    tf.float16: 2**11,
+    tf.float32: 2**24,
+    tf.float64: 2**53 }[param.dtype])
+  ```
+
+  Note: This condition is validated only when `self.validate_args = True`.
 
   #### Examples
 
-  Creates a 3-class distribution, with the 2nd class, the most likely to be
-  drawn from.
+  Creates a 3-class distribution with the 2nd class being most likely.
 
   ```python
-  p = [0.1, 0.5, 0.4]
-  dist = Categorical(probs=p)
+  dist = Categorical(probs=[0.1, 0.5, 0.4])
+  n = 1e4
+  empirical_prob = tf.cast(
+      tf.histogram_fixed_width(
+        dist.sample(int(n)),
+        [0., 2],
+        nbins=3),
+      dtype=tf.float32) / n
+  # ==> array([ 0.1005,  0.5037,  0.3958], dtype=float32)
   ```
 
-  Creates a 3-class distribution, with the 2nd class the most likely to be
-  drawn from, using logits.
+  Creates a 3-class distribution with the 2nd class being most likely.
+  Parameterized by [logits](https://en.wikipedia.org/wiki/Logit) rather than
+  probabilities.
 
   ```python
-  logits = [-50, 400, 40]
-  dist = Categorical(logits=logits)
+  dist = Categorical(logits=np.log([0.1, 0.5, 0.4])
+  n = 1e4
+  empirical_prob = tf.cast(
+      tf.histogram_fixed_width(
+        dist.sample(int(n)),
+        [0., 2],
+        nbins=3),
+      dtype=tf.float32) / n
+  # ==> array([0.1045,  0.5047, 0.3908], dtype=float32)
   ```
 
-  Creates a 3-class distribution, with the 3rd class is most likely to be drawn.
+  Creates a 3-class distribution with the 3rd class being most likely.
   The distribution functions can be evaluated on counts.
 
   ```python
@@ -75,6 +150,14 @@ class Categorical(distribution.Distribution):
 
   """
 
+  @deprecation.deprecated(
+      "2019-01-01",
+      "The TensorFlow Distributions library has moved to "
+      "TensorFlow Probability "
+      "(https://github.com/tensorflow/probability). You "
+      "should update all references to use `tfp.distributions` "
+      "instead of `tf.distributions`.",
+      warn_once=True)
   def __init__(
       self,
       logits=None,
@@ -107,14 +190,18 @@ class Categorical(distribution.Distribution):
         more of the statistic's batch members are undefined.
       name: Python `str` name prefixed to Ops created by this class.
     """
-    parameters = locals()
-    with ops.name_scope(name, values=[logits, probs]):
+    parameters = dict(locals())
+    with ops.name_scope(name, values=[logits, probs]) as name:
       self._logits, self._probs = distribution_util.get_logits_and_probs(
           logits=logits,
           probs=probs,
           validate_args=validate_args,
           multidimensional=True,
           name=name)
+
+      if validate_args:
+        self._logits = distribution_util.embed_check_categorical_event_shape(
+            self._logits)
 
       logits_shape_static = self._logits.get_shape().with_rank_at_least(1)
       if logits_shape_static.ndims is not None:
@@ -127,9 +214,9 @@ class Categorical(distribution.Distribution):
           self._batch_rank = array_ops.rank(self._logits) - 1
 
       logits_shape = array_ops.shape(self._logits, name="logits_shape")
-      if logits_shape_static[-1].value is not None:
+      if tensor_shape.dimension_value(logits_shape_static[-1]) is not None:
         self._event_size = ops.convert_to_tensor(
-            logits_shape_static[-1].value,
+            logits_shape_static.dims[-1].value,
             dtype=dtypes.int32,
             name="event_size")
       else:
@@ -186,51 +273,53 @@ class Categorical(distribution.Distribution):
       logits_2d = self.logits
     else:
       logits_2d = array_ops.reshape(self.logits, [-1, self.event_size])
-    samples = random_ops.multinomial(logits_2d, n, seed=seed)
-    samples = math_ops.cast(samples, self.dtype)
-    ret = array_ops.reshape(
-        array_ops.transpose(samples),
+    sample_dtype = dtypes.int64 if self.dtype.size > 4 else dtypes.int32
+    draws = random_ops.multinomial(
+        logits_2d, n, seed=seed, output_dtype=sample_dtype)
+    draws = array_ops.reshape(
+        array_ops.transpose(draws),
         array_ops.concat([[n], self.batch_shape_tensor()], 0))
-    return ret
+    return math_ops.cast(draws, self.dtype)
 
   def _cdf(self, k):
     k = ops.convert_to_tensor(k, name="k")
+    if self.validate_args:
+      k = distribution_util.embed_check_integer_casting_closed(
+          k, target_dtype=dtypes.int32)
 
-    # If there are multiple batch dimension, flatten them into one.
-    batch_flattened_probs = array_ops.reshape(self._probs,
-                                              [-1, self._event_size])
-    batch_flattened_k = array_ops.reshape(k, (-1,))
+    k, probs = _broadcast_cat_event_and_params(
+        k, self.probs, base_dtype=self.dtype.base_dtype)
 
-    # Form a tensor to sum over.
-    mask_tensor = array_ops.sequence_mask(batch_flattened_k, self._event_size)
-    to_sum_over = array_ops.where(mask_tensor,
-                                  batch_flattened_probs,
-                                  array_ops.zeros_like(batch_flattened_probs))
-    batch_flat_cdf = math_ops.reduce_sum(to_sum_over, axis=-1)
-    return array_ops.reshape(batch_flat_cdf, self._batch_shape())
+    # batch-flatten everything in order to use `sequence_mask()`.
+    batch_flattened_probs = array_ops.reshape(probs,
+                                              (-1, self._event_size))
+    batch_flattened_k = array_ops.reshape(k, [-1])
+
+    to_sum_over = array_ops.where(
+        array_ops.sequence_mask(batch_flattened_k, self._event_size),
+        batch_flattened_probs,
+        array_ops.zeros_like(batch_flattened_probs))
+    batch_flattened_cdf = math_ops.reduce_sum(to_sum_over, axis=-1)
+    # Reshape back to the shape of the argument.
+    return array_ops.reshape(batch_flattened_cdf, array_ops.shape(k))
 
   def _log_prob(self, k):
     k = ops.convert_to_tensor(k, name="k")
-    if self.logits.get_shape()[:-1] == k.get_shape():
-      logits = self.logits
-    else:
-      logits = self.logits * array_ops.ones_like(
-          array_ops.expand_dims(k, -1), dtype=self.logits.dtype)
-      logits_shape = array_ops.shape(logits)[:-1]
-      k *= array_ops.ones(logits_shape, dtype=k.dtype)
-      k.set_shape(tensor_shape.TensorShape(logits.get_shape()[:-1]))
+    if self.validate_args:
+      k = distribution_util.embed_check_integer_casting_closed(
+          k, target_dtype=dtypes.int32)
+    k, logits = _broadcast_cat_event_and_params(
+        k, self.logits, base_dtype=self.dtype.base_dtype)
+
     return -nn_ops.sparse_softmax_cross_entropy_with_logits(labels=k,
                                                             logits=logits)
-
-  def _prob(self, k):
-    return math_ops.exp(self._log_prob(k))
 
   def _entropy(self):
     return -math_ops.reduce_sum(
         nn_ops.log_softmax(self.logits) * self.probs, axis=-1)
 
   def _mode(self):
-    ret = math_ops.argmax(self.logits, dimension=self._batch_rank)
+    ret = math_ops.argmax(self.logits, axis=self._batch_rank)
     ret = math_ops.cast(ret, self.dtype)
     ret.set_shape(self.batch_shape)
     return ret

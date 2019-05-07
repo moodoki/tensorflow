@@ -15,9 +15,10 @@ limitations under the License.
 
 #define EIGEN_USE_THREADS
 
-#if GOOGLE_CUDA
+#if (defined(GOOGLE_CUDA) && GOOGLE_CUDA) || \
+    (defined(TENSORFLOW_USE_ROCM) && TENSORFLOW_USE_ROCM)
 #define EIGEN_USE_GPU
-#endif  // GOOGLE_CUDA
+#endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
 #include "tensorflow/core/kernels/quantize_and_dequantize_op.h"
 
@@ -49,6 +50,21 @@ class QuantizeAndDequantizeV2Op : public OpKernel {
                 errors::InvalidArgument("num_bits is out of range: ", num_bits_,
                                         " with signed_input_ ", signed_input_));
     OP_REQUIRES_OK(ctx, ctx->GetAttr("range_given", &range_given_));
+
+    string round_mode_string;
+    OP_REQUIRES_OK(ctx, ctx->GetAttr("round_mode", &round_mode_string));
+    OP_REQUIRES(
+        ctx,
+        (round_mode_string == "HALF_UP" || round_mode_string == "HALF_TO_EVEN"),
+        errors::InvalidArgument("Round mode string must be "
+                                "'HALF_UP' or "
+                                "'HALF_TO_EVEN', is '" +
+                                round_mode_string + "'"));
+    if (round_mode_string == "HALF_UP") {
+      round_mode_ = ROUND_HALF_UP;
+    } else if (round_mode_string == "HALF_TO_EVEN") {
+      round_mode_ = ROUND_HALF_TO_EVEN;
+    }
   }
 
   void Compute(OpKernelContext* ctx) override {
@@ -76,12 +92,73 @@ class QuantizeAndDequantizeV2Op : public OpKernel {
 
     functor::QuantizeAndDequantizeOneScaleFunctor<Device, T> f;
     f(ctx->eigen_device<Device>(), input.flat<T>(), signed_input_, num_bits_,
-      range_given_, &input_min_tensor, &input_max_tensor, output->flat<T>());
+      range_given_, &input_min_tensor, &input_max_tensor, round_mode_,
+      output->flat<T>());
   }
 
  private:
   bool signed_input_;
   int num_bits_;
+  bool range_given_;
+  QuantizerRoundMode round_mode_;
+};
+
+// Simulate quantization precision loss in a float tensor by:
+// 1. Quantize the tensor to fixed point numbers, which should match the target
+//    quantization method when it is used in inference.
+// 2. Dequantize it back to floating point numbers for the following ops, most
+//    likely matmul.
+// Almost identical to QuantizeAndDequantizeV2Op, except that num_bits is a
+// tensor.
+template <typename Device, typename T>
+class QuantizeAndDequantizeV3Op : public OpKernel {
+ public:
+  explicit QuantizeAndDequantizeV3Op(OpKernelConstruction* ctx)
+      : OpKernel(ctx) {
+    OP_REQUIRES_OK(ctx, ctx->GetAttr("signed_input", &signed_input_));
+    OP_REQUIRES_OK(ctx, ctx->GetAttr("range_given", &range_given_));
+  }
+
+  void Compute(OpKernelContext* ctx) override {
+    const Tensor& input = ctx->input(0);
+
+    Tensor* output = nullptr;
+    OP_REQUIRES_OK(ctx, ctx->allocate_output(0, input.shape(), &output));
+
+    Tensor num_bits_tensor;
+    num_bits_tensor = ctx->input(3);
+    int num_bits_val = num_bits_tensor.scalar<int32>()();
+
+    OP_REQUIRES(
+        ctx, num_bits_val > 0 && num_bits_val < (signed_input_ ? 62 : 63),
+        errors::InvalidArgument("num_bits is out of range: ", num_bits_val,
+                                " with signed_input_ ", signed_input_));
+
+    Tensor input_min_tensor;
+    Tensor input_max_tensor;
+    if (range_given_) {
+      input_min_tensor = ctx->input(1);
+      input_max_tensor = ctx->input(2);
+      auto min_val = input_min_tensor.scalar<T>()();
+      auto max_val = input_max_tensor.scalar<T>()();
+      OP_REQUIRES(ctx, min_val <= max_val,
+                  errors::InvalidArgument("Invalid range: input_min ", min_val,
+                                          " > input_max ", max_val));
+    } else {
+      OP_REQUIRES_OK(ctx, ctx->allocate_temp(DataTypeToEnum<T>::value,
+                                             TensorShape(), &input_min_tensor));
+      OP_REQUIRES_OK(ctx, ctx->allocate_temp(DataTypeToEnum<T>::value,
+                                             TensorShape(), &input_max_tensor));
+    }
+
+    functor::QuantizeAndDequantizeOneScaleFunctor<Device, T> f;
+    f(ctx->eigen_device<Device>(), input.flat<T>(), signed_input_, num_bits_val,
+      range_given_, &input_min_tensor, &input_max_tensor, ROUND_HALF_TO_EVEN,
+      output->flat<T>());
+  }
+
+ private:
+  bool signed_input_;
   bool range_given_;
 };
 
@@ -122,7 +199,7 @@ class QuantizeAndDequantizeOp : public OpKernel {
     functor::QuantizeAndDequantizeOneScaleFunctor<Device, T> functor;
     functor(ctx->eigen_device<Device>(), input.flat<T>(), signed_input_,
             num_bits_, range_given_, &input_min_tensor, &input_max_tensor,
-            output->flat<T>());
+            ROUND_HALF_TO_EVEN, output->flat<T>());
   }
 
  private:
@@ -140,10 +217,11 @@ struct QuantizeAndDequantizeOneScaleFunctor<CPUDevice, T> {
   void operator()(const CPUDevice& d, typename TTypes<T>::ConstVec input,
                   const bool signed_input, const int num_bits,
                   const bool range_given, Tensor* input_min_tensor,
-                  Tensor* input_max_tensor, typename TTypes<T>::Vec out) {
+                  Tensor* input_max_tensor, QuantizerRoundMode round_mode,
+                  typename TTypes<T>::Vec out) {
     QuantizeAndDequantizeOneScaleImpl<CPUDevice, T>::Compute(
         d, input, signed_input, num_bits, range_given, input_min_tensor,
-        input_max_tensor, out);
+        input_max_tensor, round_mode, out);
   }
 };
 }  // namespace functor
@@ -153,6 +231,10 @@ struct QuantizeAndDequantizeOneScaleFunctor<CPUDevice, T> {
                               .Device(DEVICE_CPU)                              \
                               .TypeConstraint<T>("T"),                         \
                           QuantizeAndDequantizeV2Op<CPUDevice, T>);            \
+  REGISTER_KERNEL_BUILDER(Name("QuantizeAndDequantizeV3")                      \
+                              .Device(DEVICE_CPU)                              \
+                              .TypeConstraint<T>("T"),                         \
+                          QuantizeAndDequantizeV3Op<CPUDevice, T>);            \
   REGISTER_KERNEL_BUILDER(                                                     \
       Name("QuantizeAndDequantize").Device(DEVICE_CPU).TypeConstraint<T>("T"), \
       QuantizeAndDequantizeOp<CPUDevice, T>);
@@ -160,7 +242,8 @@ TF_CALL_float(REGISTER_CPU_KERNEL);
 TF_CALL_double(REGISTER_CPU_KERNEL);
 #undef REGISTER_CPU_KERNEL
 
-#if GOOGLE_CUDA
+#if (defined(GOOGLE_CUDA) && GOOGLE_CUDA) || \
+    (defined(TENSORFLOW_USE_ROCM) && TENSORFLOW_USE_ROCM)
 #define REGISTER_GPU_KERNEL(T)                                                 \
   REGISTER_KERNEL_BUILDER(Name("QuantizeAndDequantizeV2")                      \
                               .Device(DEVICE_GPU)                              \
@@ -168,11 +251,18 @@ TF_CALL_double(REGISTER_CPU_KERNEL);
                               .HostMemory("input_min")                         \
                               .TypeConstraint<T>("T"),                         \
                           QuantizeAndDequantizeV2Op<GPUDevice, T>);            \
+  REGISTER_KERNEL_BUILDER(Name("QuantizeAndDequantizeV3")                      \
+                              .Device(DEVICE_GPU)                              \
+                              .HostMemory("input_max")                         \
+                              .HostMemory("input_min")                         \
+                              .HostMemory("num_bits")                          \
+                              .TypeConstraint<T>("T"),                         \
+                          QuantizeAndDequantizeV3Op<GPUDevice, T>);            \
   REGISTER_KERNEL_BUILDER(                                                     \
       Name("QuantizeAndDequantize").Device(DEVICE_GPU).TypeConstraint<T>("T"), \
       QuantizeAndDequantizeOp<GPUDevice, T>);
 TF_CALL_float(REGISTER_GPU_KERNEL);
 TF_CALL_double(REGISTER_GPU_KERNEL);
 #undef REGISTER_GPU_KERNEL
-#endif
+#endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 }  // namespace tensorflow

@@ -34,7 +34,10 @@ limitations under the License.
 #include <algorithm>
 #include <unordered_set>
 
-#include "tensorflow/core/lib/gtl/inlined_vector.h"
+#include "absl/algorithm/container.h"
+#include "absl/container/flat_hash_set.h"
+#include "absl/container/inlined_vector.h"
+#include "absl/strings/str_cat.h"
 #include "tensorflow/core/platform/logging.h"
 
 namespace tensorflow {
@@ -44,7 +47,7 @@ namespace {
 typedef std::unordered_set<int32> NodeSet;
 template <typename T>
 struct VecStruct {
-  typedef gtl::InlinedVector<T, 4> type;
+  typedef absl::InlinedVector<T, 4> type;
 };
 template <typename T>
 using Vec = typename VecStruct<T>::type;
@@ -108,7 +111,7 @@ int32 GraphCycles::NewNode() {
   if (rep_->free_nodes_.empty()) {
     Node* n = new Node;
     n->visited = false;
-    n->data = NULL;
+    n->data = nullptr;
     n->rank = rep_->nodes_.size();
     rep_->nodes_.push_back(n);
     return n->rank;
@@ -116,7 +119,7 @@ int32 GraphCycles::NewNode() {
     // Preserve preceding rank since the set of ranks in use must be
     // a permutation of [0,rep_->nodes_.size()-1].
     int32 r = rep_->free_nodes_.back();
-    rep_->nodes_[r]->data = NULL;
+    rep_->nodes_[r]->data = nullptr;
     rep_->free_nodes_.pop_back();
     return r;
   }
@@ -332,7 +335,7 @@ int GraphCycles::FindPath(int32 x, int32 y, int max_path_len,
 }
 
 bool GraphCycles::IsReachable(int32 x, int32 y) const {
-  return FindPath(x, y, 0, NULL) > 0;
+  return FindPath(x, y, 0, nullptr) > 0;
 }
 
 bool GraphCycles::IsReachableNonConst(int32 x, int32 y) {
@@ -352,6 +355,16 @@ bool GraphCycles::IsReachableNonConst(int32 x, int32 y) {
   // Clear any visited markers left by ForwardDFS.
   ClearVisitedBits(r, r->deltaf_);
   return reachable;
+}
+
+bool GraphCycles::CanContractEdge(int32 a, int32 b) {
+  CHECK(HasEdge(a, b)) << "No edge exists from " << a << " to " << b;
+  RemoveEdge(a, b);
+  bool reachable = IsReachableNonConst(a, b);
+  // Restore the graph to its original state.
+  InsertEdge(a, b);
+  // If reachable, then contracting edge will cause cycle.
+  return !reachable;
 }
 
 bool GraphCycles::ContractEdge(int32 a, int32 b) {
@@ -384,8 +397,61 @@ bool GraphCycles::ContractEdge(int32 a, int32 b) {
   return true;
 }
 
-std::unordered_set<int32> GraphCycles::Successors(int32 node) {
+std::unordered_set<int32> GraphCycles::Successors(int32 node) const {
   return rep_->nodes_[node]->out;
+}
+
+std::unordered_set<int32> GraphCycles::Predecessors(int32 node) const {
+  return rep_->nodes_[node]->in;
+}
+
+namespace {
+void SortInPostOrder(absl::Span<Node* const> nodes,
+                     std::vector<int32>* to_sort) {
+  absl::c_sort(*to_sort, [&](int32 a, int32 b) {
+    DCHECK(a == b || nodes[a]->rank != nodes[b]->rank);
+    return nodes[a]->rank > nodes[b]->rank;
+  });
+}
+}  // namespace
+
+std::vector<int32> GraphCycles::AllNodesInPostOrder() const {
+  absl::flat_hash_set<int32> free_nodes_set;
+  absl::c_copy(rep_->free_nodes_,
+               std::inserter(free_nodes_set, free_nodes_set.begin()));
+
+  std::vector<int32> all_nodes;
+  all_nodes.reserve(rep_->nodes_.size() - free_nodes_set.size());
+  for (int64 i = 0, e = rep_->nodes_.size(); i < e; i++) {
+    if (!free_nodes_set.contains(i)) {
+      all_nodes.push_back(i);
+    }
+  }
+
+  SortInPostOrder(rep_->nodes_, &all_nodes);
+  return all_nodes;
+}
+
+string GraphCycles::DebugString() const {
+  absl::flat_hash_set<int32> free_nodes_set;
+  for (int32 free_node : rep_->free_nodes_) {
+    free_nodes_set.insert(free_node);
+  }
+
+  string result = "digraph {\n";
+  for (int i = 0; i < rep_->nodes_.size(); i++) {
+    if (free_nodes_set.contains(i)) {
+      continue;
+    }
+
+    for (int32 succ : rep_->nodes_[i]->out) {
+      absl::StrAppend(&result, "  \"", i, "\" -> \"", succ, "\"\n");
+    }
+  }
+
+  absl::StrAppend(&result, "}\n");
+
+  return result;
 }
 
 }  // namespace tensorflow

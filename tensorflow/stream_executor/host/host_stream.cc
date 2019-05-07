@@ -17,41 +17,55 @@ limitations under the License.
 // the HostExecutor implementation.
 #include "tensorflow/stream_executor/host/host_stream.h"
 
-namespace perftools {
-namespace gputools {
+#include "absl/synchronization/notification.h"
+
+namespace stream_executor {
 namespace host {
 
 HostStream::HostStream()
-    : host_executor_(new port::ThreadPool(port::Env::Default(),
-                                          port::ThreadOptions(),
-                                          "host_executor", kExecutorThreads)) {}
+    : thread_(port::Env::Default()->StartThread(
+          port::ThreadOptions(), "host_executor", [this]() { WorkLoop(); })) {}
 
-HostStream::~HostStream() {}
-
-bool HostStream::EnqueueTask(std::function<void()> task) {
+HostStream::~HostStream() {
   {
-    mutex_lock lock(mu_);
-    ++pending_tasks_;
+    absl::MutexLock lock(&mu_);
+    work_queue_.push(nullptr);
   }
-  host_executor_->Schedule([this, task]() {
-    task();
-    {
-      mutex_lock lock(mu_);
-      --pending_tasks_;
-    }
-    completion_condition_.notify_all();
-  });
+  // thread_'s destructor blocks until the thread finishes running.
+  thread_.reset();
+}
+
+bool HostStream::EnqueueTask(std::function<void()> fn) {
+  CHECK(fn != nullptr);
+  absl::MutexLock lock(&mu_);
+  work_queue_.push(std::move(fn));
   return true;
 }
 
-void HostStream::BlockUntilDone() {
-  mutex_lock lock(mu_);
-  while (pending_tasks_ != 0) {
-    completion_condition_.wait(lock);
+bool HostStream::WorkAvailable() { return !work_queue_.empty(); }
+
+void HostStream::WorkLoop() {
+  while (true) {
+    std::function<void()> fn;
+    {
+      absl::MutexLock lock(&mu_);
+      mu_.Await(absl::Condition(this, &HostStream::WorkAvailable));
+      fn = std::move(work_queue_.front());
+      work_queue_.pop();
+    }
+    if (!fn) {
+      return;
+    }
+    fn();
   }
+}
+
+void HostStream::BlockUntilDone() {
+  absl::Notification done;
+  EnqueueTask([&done]() { done.Notify(); });
+  done.WaitForNotification();
 }
 
 }  // namespace host
 
-}  // namespace gputools
-}  // namespace perftools
+}  // namespace stream_executor

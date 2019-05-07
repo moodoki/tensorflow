@@ -13,14 +13,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#ifndef TENSORFLOW_FRAMEWORK_MEMORY_TYPES_H_
-#define TENSORFLOW_FRAMEWORK_MEMORY_TYPES_H_
+#ifndef TENSORFLOW_CORE_FRAMEWORK_MEMORY_TYPES_H_
+#define TENSORFLOW_CORE_FRAMEWORK_MEMORY_TYPES_H_
 
-#include "tensorflow/core/framework/graph.pb.h"
 #include "tensorflow/core/framework/op.h"
 #include "tensorflow/core/framework/types.h"
 
 namespace tensorflow {
+
+class NodeDef;
 
 // Returns into *{input,output}_memory_types the memory type of each
 // {input,output} tensor.
@@ -34,4 +35,4 @@ Status MemoryTypesForNode(const OpRegistryInterface* op_registry,
 
 }  // namespace tensorflow
 
-#endif  // TENSORFLOW_FRAMEWORK_MEMORY_TYPES_H_
+#endif  // TENSORFLOW_CORE_FRAMEWORK_MEMORY_TYPES_H_

@@ -15,7 +15,9 @@
 
 """Ops for building neural network seq2seq decoders and losses.
 
-See the @{$python/contrib.seq2seq} guide.
+See the
+[Contrib Seq2seq](https://tensorflow.org/api_guides/python/contrib.seq2seq)
+guide.
 """
 
 from __future__ import absolute_import
@@ -47,6 +49,8 @@ _allowed_symbols = [
     "FinalBeamSearchDecoderOutput",
     "gather_tree",
     "GreedyEmbeddingHelper",
+    "InferenceHelper",
+    "SampleEmbeddingHelper",
     "ScheduledEmbeddingTrainingHelper",
     "ScheduledOutputTrainingHelper",
     "TrainingHelper",
@@ -56,7 +60,13 @@ _allowed_symbols = [
     "AttentionWrapperState",
     "AttentionWrapper",
     "AttentionMechanism",
-    "tile_batch"]
+    "tile_batch",
+    "safe_cumprod",
+    "monotonic_attention",
+    "monotonic_probability_fn",
+    "BahdanauMonotonicAttention",
+    "LuongMonotonicAttention",
+]
 
 
 remove_undocumented(__name__, _allowed_symbols)

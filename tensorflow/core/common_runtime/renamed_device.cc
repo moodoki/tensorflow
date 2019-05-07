@@ -14,14 +14,14 @@ limitations under the License.
 ==============================================================================*/
 
 #include "tensorflow/core/common_runtime/renamed_device.h"
+#include "absl/memory/memory.h"
 
 namespace tensorflow {
 
-// TODO(saeta): Convert to returning a std::unique_ptr?
 /* static */
-Device* RenamedDevice::NewRenamedDevice(const string& new_base,
-                                        Device* underlying,
-                                        bool owns_underlying) {
+std::unique_ptr<Device> RenamedDevice::NewRenamedDevice(
+    const string& new_base, Device* underlying, bool owns_underlying,
+    bool isolate_session_state) {
   DeviceNameUtils::ParsedName parsed_name;
   CHECK(DeviceNameUtils::ParseFullName(new_base, &parsed_name));
   DeviceNameUtils::ParsedName underlying_parsed_name =
@@ -35,15 +35,18 @@ Device* RenamedDevice::NewRenamedDevice(const string& new_base,
                                           parsed_name.id);
   DeviceAttributes attributes(underlying->attributes());
   attributes.set_name(name);
-  return new RenamedDevice(underlying, attributes, owns_underlying);
+  // Call absl::WrapUnique to access private constructor.
+  return absl::WrapUnique(new RenamedDevice(
+      underlying, attributes, owns_underlying, isolate_session_state));
 }
 
 RenamedDevice::RenamedDevice(Device* underlying,
                              const DeviceAttributes& attributes,
-                             bool owns_underlying)
+                             bool owns_underlying, bool isolate_session_state)
     : Device(underlying->env(), attributes),
       underlying_(underlying),
-      owns_underlying_(owns_underlying) {}
+      owns_underlying_(owns_underlying),
+      isolate_session_state_(isolate_session_state) {}
 
 RenamedDevice::~RenamedDevice() {
   if (owns_underlying_) {

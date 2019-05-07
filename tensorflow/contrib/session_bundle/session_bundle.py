@@ -34,7 +34,8 @@ from tensorflow.python.training import saver as saver_lib
 from tensorflow.python.util.deprecation import deprecated
 
 
-@deprecated("2017-06-30", "Please use SavedModel instead.")
+@deprecated("2017-06-30",
+            "No longer supported. Switch to SavedModel immediately.")
 def maybe_session_bundle_dir(export_dir):
   """Checks if the model path contains session bundle model.
 
@@ -50,7 +51,8 @@ def maybe_session_bundle_dir(export_dir):
   return file_io.file_exists(meta_graph_filename)
 
 
-@deprecated("2017-06-30", "Please use SavedModel instead.")
+@deprecated("2017-06-30",
+            "No longer supported. Switch to SavedModel immediately.")
 def load_session_bundle_from_path(export_dir,
                                   target="",
                                   config=None,
@@ -62,11 +64,12 @@ def load_session_bundle_from_path(export_dir,
 
   Args:
     export_dir: the directory that contains files exported by exporter.
-    target: The execution engine to connect to. See target in tf.Session()
+    target: The execution engine to connect to. See target in
+      tf.compat.v1.Session()
     config: A ConfigProto proto with configuration options. See config in
-    tf.Session()
+      tf.compat.v1.Session()
     meta_graph_def: optional object of type MetaGraphDef. If this object is
-    present, then it is used instead of parsing MetaGraphDef from export_dir.
+      present, then it is used instead of parsing MetaGraphDef from export_dir.
 
   Returns:
     session: a tensorflow session created from the variable files.

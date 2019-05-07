@@ -18,11 +18,13 @@ limitations under the License.
 
 #include <functional>
 #include <iosfwd>
+#include <memory>
 #include <string>
 #include "tensorflow/core/lib/core/error_codes.pb.h"
 #include "tensorflow/core/lib/core/stringpiece.h"
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/macros.h"
+#include "tensorflow/core/platform/types.h"
 
 namespace tensorflow {
 
@@ -36,8 +38,7 @@ class TF_MUST_USE_RESULT Status;
 class Status {
  public:
   /// Create a success status.
-  Status() : state_(NULL) {}
-  ~Status() { delete state_; }
+  Status() {}
 
   /// \brief Create a status with the specified error code and msg as a
   /// human-readable string containing more detailed information.
@@ -91,9 +92,34 @@ class Status {
   };
   // OK status has a `NULL` state_.  Otherwise, `state_` points to
   // a `State` structure containing the error code and message(s)
-  State* state_;
+  std::unique_ptr<State> state_;
 
   void SlowCopyFrom(const State* src);
+};
+
+// Helper class to manage multiple child status values.
+class StatusGroup {
+ public:
+  // Utility function to mark a Status as derived. By marking derived status,
+  // Derived status messages are ignored when reporting errors to end users.
+  static Status MakeDerived(const Status& s);
+  static bool IsDerived(const Status& s);
+
+  // Return a merged status with combined child status messages with a summary.
+  Status as_summary_status() const;
+  // Return a merged status with combined child status messages with
+  // concatenation.
+  Status as_concatenated_status() const;
+
+  bool ok() const { return ok_; }
+
+  // Augment this group with the child status `status`.
+  void Update(const Status& status);
+
+ private:
+  bool ok_ = true;
+  size_t num_ok_ = 0;
+  std::vector<Status> children_;
 };
 
 inline Status::Status(const Status& s)
@@ -103,7 +129,7 @@ inline void Status::operator=(const Status& s) {
   // The following condition catches both aliasing (when this == &s),
   // and the common case where both s and *this are ok.
   if (state_ != s.state_) {
-    SlowCopyFrom(s.state_);
+    SlowCopyFrom(s.state_.get());
   }
 }
 
@@ -120,17 +146,19 @@ typedef std::function<void(const Status&)> StatusCallback;
 
 extern tensorflow::string* TfCheckOpHelperOutOfLine(
     const ::tensorflow::Status& v, const char* msg);
+
 inline tensorflow::string* TfCheckOpHelper(::tensorflow::Status v,
                                            const char* msg) {
   if (v.ok()) return nullptr;
   return TfCheckOpHelperOutOfLine(v, msg);
 }
-#define TF_CHECK_OK(val)                                             \
-  while (::tensorflow::string* _result = TfCheckOpHelper(val, #val)) \
-  LOG(FATAL) << *(_result)
-#define TF_QCHECK_OK(val)                                            \
-  while (::tensorflow::string* _result = TfCheckOpHelper(val, #val)) \
-  LOG(QFATAL) << *(_result)
+
+#define TF_DO_CHECK_OK(val, level)                                \
+  while (auto _result = ::tensorflow::TfCheckOpHelper(val, #val)) \
+  LOG(level) << *(_result)
+
+#define TF_CHECK_OK(val) TF_DO_CHECK_OK(val, FATAL)
+#define TF_QCHECK_OK(val) TF_DO_CHECK_OK(val, QFATAL)
 
 // DEBUG only version of TF_CHECK_OK.  Compiler still parses 'val' even in opt
 // mode.

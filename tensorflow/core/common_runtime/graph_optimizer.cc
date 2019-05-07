@@ -33,8 +33,12 @@ GraphOptimizer::GraphOptimizer(const OptimizerOptions& opts) : opts_(opts) {
 
 GraphOptimizer::~GraphOptimizer() {}
 
-void GraphOptimizer::Optimize(FunctionLibraryRuntime* runtime, Env* env,
-                              Device* device, std::unique_ptr<Graph>* graph) {
+void GraphOptimizer::Optimize(
+    FunctionLibraryRuntime* runtime, Env* env, const Device* device,
+    std::unique_ptr<Graph>* graph,
+    const std::unordered_map<string, std::vector<PartialTensorShape>>*
+        shape_map,
+    const NodePredicate& cse_consider_fn, const NodePredicate& cf_consider_fn) {
   Graph* g = graph->get();
   DumpGraph("Initial", g);
 
@@ -57,6 +61,12 @@ void GraphOptimizer::Optimize(FunctionLibraryRuntime* runtime, Env* env,
 
     if (opts_.do_constant_folding()) {
       ConstantFoldingOptions cf_opts;
+      cf_opts.shape_map = shape_map;
+      cf_opts.consider = cf_consider_fn;
+      if (opts_.max_folded_constant_in_bytes() > 0) {
+        cf_opts.max_constant_size_in_bytes =
+            opts_.max_folded_constant_in_bytes();
+      }
       bool was_mutated;
       ConstantFold(cf_opts, runtime, env, device, g, &was_mutated)
           .IgnoreError();
@@ -72,13 +82,25 @@ void GraphOptimizer::Optimize(FunctionLibraryRuntime* runtime, Env* env,
       changed = true;
     }
     if (opts_.do_common_subexpression_elimination() &&
-        OptimizeCSE(g, nullptr)) {
+        OptimizeCSE(g, cse_consider_fn)) {
       DumpGraph("OptimizeCSE", g);
       changed = true;
     }
-    if (opts_.do_function_inlining() && ExpandInlineFunctions(runtime, g)) {
-      DumpGraph("ExpandInlineFunctions", g);
-      changed = true;
+    if (opts_.do_function_inlining()) {
+      ExpandInlineFunctionsOptions expand_inline_opts;
+      expand_inline_opts.native_options.override_device = true;
+      // GraphOptimizer is running:
+      //   (1) After partitioning when executing with a Session API.
+      //   (2) For a single device function body after instantiation.
+      // We can't inline multi-device functions in these cases, because it might
+      // lead to multiple device assignments.
+      expand_inline_opts.multi_device_options.disable_inlining = true;
+
+      bool was_mutated = ExpandInlineFunctions(runtime, g, expand_inline_opts);
+      if (was_mutated) {
+        DumpGraph("ExpandInlineFunctions", g);
+        changed = true;
+      }
     }
     if (!changed) break;
   }
@@ -90,6 +112,14 @@ void GraphOptimizer::Optimize(FunctionLibraryRuntime* runtime, Env* env,
   graph->swap(copy);
 
   DumpGraph("ReCopy", graph->get());
+}
+
+void GraphOptimizer::Optimize(FunctionLibraryRuntime* runtime, Env* env,
+                              const Device* device,
+                              std::unique_ptr<Graph>* graph,
+                              const Options& options) {
+  Optimize(runtime, env, device, graph, options.shape_map,
+           options.cse_consider_fn, options.cf_consider_fn);
 }
 
 }  // end namespace tensorflow

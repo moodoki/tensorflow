@@ -26,11 +26,20 @@ limitations under the License.
 
 #include <stddef.h>
 
-#include "tensorflow/stream_executor/lib/casts.h"
 #include "tensorflow/stream_executor/platform/port.h"
 
 namespace perftools {
 namespace gputools {
+
+// Temporarily pull stream_executor into perftools::gputools while we migrate
+// code to the new namespace.  TODO(b/77980417): Remove this once we've
+// completed the migration.
+using namespace stream_executor;  // NOLINT[build/namespaces]
+
+}  // namespace gputools
+}  // namespace perftools
+
+namespace stream_executor {
 
 class StreamExecutor;
 
@@ -49,9 +58,8 @@ class DeviceMemoryBase {
   // Default constructor instantiates a null-pointed, zero-sized device memory
   // region. An opaque pointer may be provided -- see header for details on the
   // opacity of that pointer.
-  explicit DeviceMemoryBase(void *opaque = nullptr, uint64 size = 0,
-                            bool is_sub_buffer = false)
-      : opaque_(opaque), size_(size), is_sub_buffer_(is_sub_buffer) {}
+  explicit DeviceMemoryBase(void *opaque = nullptr, uint64 size = 0)
+      : opaque_(opaque), size_(size) {}
 
   // Returns whether the backing memory is the null pointer.
   // A `== nullptr` convenience method is also provided.
@@ -75,9 +83,6 @@ class DeviceMemoryBase {
   void *opaque() { return opaque_; }
   const void *opaque() const { return opaque_; }
 
-  // Returns true if this is an offset into another primary allocation.
-  bool is_sub_buffer() const { return is_sub_buffer_; }
-
   // Returns whether the two DeviceMemoryBase segments are identical (both in
   // their opaque pointer and size).
   bool IsSameAs(const DeviceMemoryBase &other) const {
@@ -97,7 +102,6 @@ class DeviceMemoryBase {
  private:
   void *opaque_;  // Platform-dependent value representing allocated memory.
   uint64 size_;   // Size in bytes of this allocation.
-  bool is_sub_buffer_;  // Is this a primary allocation or a sub-buffer?
 };
 
 // Typed wrapper around "void *"-like DeviceMemoryBase.
@@ -117,7 +121,7 @@ class DeviceMemory final : public DeviceMemoryBase {
   // regions, this effectively amounts to a cast from a void*.
   explicit DeviceMemory(const DeviceMemoryBase &other)
       : DeviceMemoryBase(const_cast<DeviceMemoryBase &>(other).opaque(),
-                         other.size(), other.is_sub_buffer()) {}
+                         other.size()) {}
 
   // Returns the number of elements of type ElemT that constitute this
   // allocation.
@@ -280,7 +284,6 @@ static_assert(sizeof(Float2) == 2 * sizeof(float), "Float2 must be packed");
 static_assert(sizeof(Float4) == 4 * sizeof(float), "Float4 must be packed");
 static_assert(sizeof(Double2) == 2 * sizeof(double), "Double2 must be packed");
 
-}  // namespace gputools
-}  // namespace perftools
+}  // namespace stream_executor
 
 #endif  // TENSORFLOW_STREAM_EXECUTOR_DEVICE_MEMORY_H_
